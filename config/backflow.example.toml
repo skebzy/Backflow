@@ -20,6 +20,7 @@ host_header = "origin.internal"
 sni = "origin.internal"
 use_tls = false
 peers = [
+  # Replace these demo localhost peers with your real origin addresses.
   "127.0.0.1:9000",
   "127.0.0.1:9001",
 ]

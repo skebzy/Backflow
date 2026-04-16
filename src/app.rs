@@ -85,6 +85,5 @@ pub fn run() -> Result<()> {
         }
     }
 
-    server.run_forever();
-    Ok(())
+    server.run_forever()
 }

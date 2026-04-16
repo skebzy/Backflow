@@ -277,6 +277,52 @@ prepare_layout() {
   mkdir -p logs scripts config deploy docs
 }
 
+write_demo_origin_helper() {
+  cat > scripts/demo-origin.py <<'EOF'
+#!/usr/bin/env python3
+import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class DemoOriginHandler(BaseHTTPRequestHandler):
+    server_version = "BackflowDemoOrigin/1.0"
+    sys_version = ""
+
+    def _write(self, status: int, body: bytes, content_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path in ("/healthz", "/readyz"):
+            payload = json.dumps({"ok": True, "service": "backflow-demo-origin"}).encode()
+            self._write(200, payload, "application/json")
+            return
+
+        body = (
+            "Backflow demo origin is running on 127.0.0.1:9000.\n"
+            "Point primary.peers at your real application when you are ready.\n"
+        ).encode()
+        self._write(200, body, "text/plain; charset=utf-8")
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        self.do_GET()
+
+    def log_message(self, format: str, *args) -> None:  # noqa: A003
+        return
+
+
+if __name__ == "__main__":
+    server = ThreadingHTTPServer(("127.0.0.1", 9000), DemoOriginHandler)
+    server.serve_forever()
+EOF
+  chmod +x scripts/demo-origin.py
+}
+
 render_pingora_config() {
   local threads="$1"
   cat > config/pingora.yaml <<EOF
@@ -329,6 +375,9 @@ use_tls = false
 peers = [
   "127.0.0.1:9000",
 ]
+
+[sinkhole]
+enabled = false
 
 [health_checks]
 enabled = true
@@ -407,6 +456,7 @@ set_forwarded_port = true
 EOF
 
   echo "Created config/backflow.toml from detected host defaults."
+  echo "The default first run expects a localhost demo origin on 127.0.0.1:9000 until you point primary.peers at your real app."
 }
 
 write_runtime_helper() {
@@ -420,7 +470,66 @@ cd "$ROOT_DIR"
 export BACKFLOW_CONFIG="${BACKFLOW_CONFIG:-config/backflow.toml}"
 export RUST_LOG="${RUST_LOG:-info}"
 
-exec ./target/release/backflow -- -c config/pingora.yaml
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+port_is_listening() {
+  local port="$1"
+
+  if need_cmd ss; then
+    ss -ltn "( sport = :$port )" | grep -q ":$port"
+    return
+  fi
+
+  if need_cmd netstat; then
+    netstat -ltn 2>/dev/null | grep -q "[.:]$port[[:space:]]"
+    return
+  fi
+
+  return 1
+}
+
+config_uses_default_demo_origin() {
+  [[ -f "$BACKFLOW_CONFIG" ]] || return 1
+  grep -q '"127.0.0.1:9000"' "$BACKFLOW_CONFIG"
+}
+
+cleanup() {
+  if [[ -n "${DEMO_ORIGIN_PID:-}" ]] && kill -0 "$DEMO_ORIGIN_PID" >/dev/null 2>&1; then
+    kill "$DEMO_ORIGIN_PID" >/dev/null 2>&1 || true
+    wait "$DEMO_ORIGIN_PID" 2>/dev/null || true
+  fi
+}
+
+maybe_start_demo_origin() {
+  if [[ "${BACKFLOW_AUTO_DEMO_ORIGIN:-1}" == "0" ]]; then
+    return
+  fi
+
+  if ! config_uses_default_demo_origin; then
+    return
+  fi
+
+  if port_is_listening 9000; then
+    return
+  fi
+
+  if ! need_cmd python3; then
+    echo "Backflow default config points at 127.0.0.1:9000, but python3 is not installed for the demo origin." >&2
+    echo "Install python3 or edit $BACKFLOW_CONFIG so primary.peers points at your real application." >&2
+    exit 1
+  fi
+
+  python3 "$ROOT_DIR/scripts/demo-origin.py" &
+  DEMO_ORIGIN_PID="$!"
+  trap cleanup EXIT INT TERM
+  echo "Started Backflow demo origin on 127.0.0.1:9000 for first-run traffic."
+}
+
+maybe_start_demo_origin
+
+exec ./target/release/backflow -c config/pingora.yaml
 EOF
   chmod +x scripts/run-linux.sh
 }
@@ -530,6 +639,7 @@ Optional:
 
 Important:
 - This tunes the initial setup to the VPS shape.
+- The default first run auto-starts a tiny demo origin on 127.0.0.1:9000 when that port is unused.
 - It still does not make a small VPS immune to upstream bandwidth saturation.
 EOF
 }
@@ -552,6 +662,7 @@ main() {
 
   render_pingora_config "$threads"
   render_backflow_config "$rate_limit" "$concurrency_cap" "$ipv6_enabled"
+  write_demo_origin_helper
   write_runtime_helper
   write_summary "$cores" "$mem_mb" "$ipv6_enabled" "$fd_limit" "$threads" "$rate_limit" "$concurrency_cap" "$build_jobs"
   build_release "$build_jobs"

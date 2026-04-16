@@ -74,7 +74,7 @@ impl BackflowProxy {
     fn request_meta(session: &Session) -> Result<RequestMeta> {
         let peer_ip = session
             .client_addr()
-            .map(|addr| addr.ip())
+            .and_then(|addr| addr.as_inet().map(|addr| addr.ip()))
             .ok_or_else(|| anyhow!("failed to read client address from session"))?;
         let req = session.req_header();
         let path = req.uri.path().to_string();
@@ -397,7 +397,7 @@ impl ProxyHttp for BackflowProxy {
         upstream_request.insert_header("X-Backflow-Decision", ctx.decision.label())?;
         upstream_request.insert_header("X-Backflow-Pool", ctx.selected_pool.as_str())?;
         for (header, value) in &self.backend_headers {
-            upstream_request.insert_header(header.as_str(), value.as_str())?;
+            upstream_request.insert_header(header.clone(), value.clone())?;
         }
         Ok(())
     }

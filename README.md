@@ -91,6 +91,7 @@ That command will:
 - use sparse Cargo registry access and VPS-sized parallel build jobs automatically
 - generate `config/pingora.yaml` to match the detected VPS profile
 - create `config/backflow.toml` with first-run defaults if it does not exist yet
+- create a tiny localhost demo origin for first-run traffic when `primary.peers` still points at `127.0.0.1:9000`
 - create `scripts/run-linux.sh`
 - launch Backflow immediately
 
@@ -117,6 +118,7 @@ That script will:
 - use sparse Cargo registry access and VPS-sized parallel build jobs automatically
 - generate `config/pingora.yaml` for the detected host
 - create `config/backflow.toml` with first-run defaults if needed
+- create a tiny localhost demo origin helper for first-run traffic on `127.0.0.1:9000`
 - create `scripts/run-linux.sh` as a simple launch helper
 
 The detected bootstrap summary is also written to `logs/bootstrap-summary.txt`.
@@ -130,6 +132,8 @@ $env:BACKFLOW_CONFIG = "config/backflow.toml"
 $env:RUST_LOG = "info"
 cargo run -- -c config/pingora.yaml
 ```
+
+If `config/backflow.toml` still uses the generated `127.0.0.1:9000` peer, `scripts/run-linux.sh` now starts a tiny local demo origin automatically so the proxy is immediately usable on first boot. Replace `primary.peers` with your real application as soon as you are ready.
 
 ## Install Rust on Windows
 

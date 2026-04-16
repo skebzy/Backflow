@@ -24,7 +24,7 @@ pub fn build_cluster(
         let hc = health_check::TcpHealthCheck::new();
         upstreams.set_health_check(hc);
         upstreams.health_check_frequency = Some(Duration::from_secs(health_checks.frequency_secs));
-        let background = background_service(format!("{} health checks", cluster.name), upstreams);
+        let background = background_service(&cluster.name, upstreams);
 
         return Ok(ClusterRuntime {
             load_balancer: background.task(),
