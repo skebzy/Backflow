@@ -82,6 +82,8 @@ That command will:
 
 - install Rust with `rustup` if it is missing
 - install the system C build toolchain automatically on common Linux distros when it is missing
+- install `cmake` automatically when native Rust dependencies need it
+- install common native dependency helpers like `pkg-config`, `perl`, OpenSSL headers, and CA certificates
 - reuse an already-suitable Rust toolchain instead of reinstalling it every time
 - detect CPU cores, memory, IPv6 availability, and file-descriptor limits
 - build Backflow in release mode
@@ -106,6 +108,8 @@ That script will:
 
 - install Rust with `rustup` if it is missing
 - install the system C build toolchain automatically on common Linux distros when it is missing
+- install `cmake` automatically when native Rust dependencies need it
+- install common native dependency helpers like `pkg-config`, `perl`, OpenSSL headers, and CA certificates
 - reuse an already-suitable Rust toolchain instead of reinstalling it every time
 - detect CPU cores, memory, IPv6 availability, and file-descriptor limits
 - build Backflow in release mode

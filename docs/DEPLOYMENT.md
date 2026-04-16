@@ -39,7 +39,7 @@ The bootstrap scripts automatically detect:
 
 They then use that information to generate the initial `config/pingora.yaml` and first-run `config/backflow.toml` defaults.
 
-The bootstrap also installs the system compiler toolchain when possible, reuses a suitable stable Rust toolchain when one is already present, and if the first build fails it retries in stages before doing heavier Cargo cache cleanup.
+The bootstrap also installs the native build toolchain, including `cmake`, `pkg-config`, `perl`, OpenSSL development headers, and CA certificates when possible, reuses a suitable stable Rust toolchain when one is already present, and if the first build fails it retries in stages before doing heavier Cargo cache cleanup.
 
 ## Basic rollout steps
 

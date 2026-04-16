@@ -13,6 +13,16 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+need_any_cmd() {
+  local cmd
+  for cmd in "$@"; do
+    if need_cmd "$cmd"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 has_rust_targets() {
   local dir="$1"
   [[ -f "$dir/src/main.rs" || -f "$dir/src/lib.rs" ]]
@@ -51,51 +61,58 @@ have_sudo() {
 }
 
 install_system_build_tools() {
-  if need_cmd cc; then
+  if need_cmd cc && need_cmd c++ && need_cmd make && need_cmd cmake && need_any_cmd pkg-config pkgconf && need_cmd perl; then
     return
   fi
 
-  echo "C toolchain not found. Installing system build tools..."
+  echo "Required native build tools are missing. Installing system build tools..."
 
   if [[ -f /etc/debian_version ]]; then
     if have_sudo; then
       sudo apt-get update
-      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config clang
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        clang \
+        cmake \
+        perl \
+        libssl-dev \
+        ca-certificates
       return
     fi
 
-    echo "Missing compiler toolchain. Run:"
-    echo "  sudo apt-get update && sudo apt-get install -y build-essential pkg-config clang"
+    echo "Missing native build tools. Run:"
+    echo "  sudo apt-get update && sudo apt-get install -y build-essential pkg-config clang cmake perl libssl-dev ca-certificates"
     exit 1
   fi
 
   if [[ -f /etc/redhat-release ]]; then
     if have_sudo; then
       if need_cmd dnf; then
-        sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config clang
+        sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config clang cmake perl openssl-devel ca-certificates
       else
-        sudo yum install -y gcc gcc-c++ make pkgconfig clang
+        sudo yum install -y gcc gcc-c++ make pkgconfig clang cmake perl openssl-devel ca-certificates
       fi
       return
     fi
 
-    echo "Missing compiler toolchain. Install gcc/g++/make/pkgconfig/clang with your package manager."
+    echo "Missing native build tools. Install gcc/g++/make/pkgconfig/clang/cmake/perl/openssl-devel with your package manager."
     exit 1
   fi
 
   if [[ -f /etc/alpine-release ]]; then
     if have_sudo; then
-      sudo apk add --no-cache build-base pkgconf clang
+      sudo apk add --no-cache build-base pkgconf clang cmake perl openssl-dev ca-certificates
       return
     fi
 
-    echo "Missing compiler toolchain. Run:"
-    echo "  sudo apk add --no-cache build-base pkgconf clang"
+    echo "Missing native build tools. Run:"
+    echo "  sudo apk add --no-cache build-base pkgconf clang cmake perl openssl-dev ca-certificates"
     exit 1
   fi
 
-  echo "Missing compiler toolchain and unsupported distro auto-install path."
-  echo "Install a C compiler toolchain so the 'cc' command exists, then rerun this script."
+  echo "Missing native build tools and unsupported distro auto-install path."
+  echo "Install a C/C++ compiler toolchain plus cmake, pkg-config, perl, OpenSSL headers, and CA certificates, then rerun this script."
   exit 1
 }
 
