@@ -13,6 +13,39 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+has_rust_targets() {
+  local dir="$1"
+  [[ -f "$dir/src/main.rs" || -f "$dir/src/lib.rs" ]]
+}
+
+resolve_project_root() {
+  if [[ -f "$ROOT_DIR/Cargo.toml" ]] && has_rust_targets "$ROOT_DIR"; then
+    return
+  fi
+
+  local matches=()
+  local candidate
+  for candidate in "$ROOT_DIR"/*; do
+    [[ -d "$candidate" ]] || continue
+    if [[ -f "$candidate/Cargo.toml" ]] && has_rust_targets "$candidate"; then
+      matches+=("$candidate")
+    fi
+  done
+
+  if [[ "${#matches[@]}" -eq 1 ]]; then
+    ROOT_DIR="${matches[0]}"
+    cd "$ROOT_DIR"
+    echo "Detected Backflow project files in nested directory: $ROOT_DIR"
+    return
+  fi
+
+  echo "Backflow project files were not found in: $ROOT_DIR"
+  echo "Expected Cargo.toml plus src/main.rs or src/lib.rs."
+  echo "This usually means the VPS checkout is incomplete or you are running the script from the wrong clone."
+  echo "Re-clone the repository, then rerun the script."
+  exit 1
+}
+
 have_sudo() {
   need_cmd sudo && sudo -n true >/dev/null 2>&1
 }
@@ -27,7 +60,7 @@ install_system_build_tools() {
   if [[ -f /etc/debian_version ]]; then
     if have_sudo; then
       sudo apt-get update
-      sudo apt-get install -y build-essential pkg-config clang
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config clang
       return
     fi
 
@@ -85,6 +118,23 @@ load_rust_env() {
   fi
 }
 
+rust_version_meets_minimum() {
+  local current major minor
+  current="$(rustc -V 2>/dev/null | awk '{print $2}')"
+  major="${current%%.*}"
+  minor="$(echo "$current" | cut -d. -f2)"
+
+  if [[ -z "$major" || -z "$minor" ]]; then
+    return 1
+  fi
+
+  if (( major > 1 )); then
+    return 0
+  fi
+
+  (( minor >= 85 ))
+}
+
 install_rust() {
   load_rust_env
   if ! need_cmd curl; then
@@ -98,10 +148,15 @@ install_rust() {
     load_rust_env
   fi
 
-  echo "Refreshing the stable Rust toolchain..."
   rustup set profile minimal
-  rustup toolchain install stable --component rustfmt --component clippy
-  rustup override set stable
+  rustup set auto-self-update disable
+  if ! need_cmd rustc || ! need_cmd cargo || ! rust_version_meets_minimum; then
+    echo "Installing or updating the stable Rust toolchain..."
+    rustup toolchain install stable --profile minimal --no-self-update
+  else
+    echo "Rust toolchain already satisfies the project minimum."
+  fi
+  rustup override set stable >/dev/null
   load_rust_env
 }
 
@@ -128,6 +183,26 @@ detect_ipv6_enabled() {
 
 detect_fd_limit() {
   ulimit -n 2>/dev/null || echo 65535
+}
+
+pick_build_jobs() {
+  local cores="$1"
+  local mem_mb="$2"
+  local jobs="$cores"
+
+  if (( mem_mb < 2048 && jobs > 2 )); then
+    jobs=2
+  elif (( mem_mb < 4096 && jobs > 4 )); then
+    jobs=4
+  elif (( jobs > 8 )); then
+    jobs=8
+  fi
+
+  if (( jobs < 1 )); then
+    jobs=1
+  fi
+
+  echo "$jobs"
 }
 
 pick_threads() {
@@ -182,7 +257,7 @@ pick_concurrency_cap() {
 }
 
 prepare_layout() {
-  mkdir -p logs scripts config deploy docs src
+  mkdir -p logs scripts config deploy docs
 }
 
 render_pingora_config() {
@@ -304,8 +379,14 @@ strip_inbound_internal_headers = [
   "X-Forwarded-For",
   "X-Forwarded-Host",
   "X-Forwarded-Proto",
+  "X-Forwarded-Port",
+  "X-Real-IP",
+  "True-Client-IP",
+  "CF-Connecting-IP",
+  "CF-Connecting-IPv6",
   "Forwarded",
 ]
+set_forwarded_port = true
 EOF
 
   echo "Created config/backflow.toml from detected host defaults."
@@ -335,6 +416,7 @@ write_summary() {
   local threads="$5"
   local rate_limit="$6"
   local concurrency_cap="$7"
+  local build_jobs="$8"
 
   cat > logs/bootstrap-summary.txt <<EOF
 cpu_cores=$cores
@@ -344,24 +426,50 @@ fd_limit=$fd_limit
 recommended_threads=$threads
 recommended_requests_per_period=$rate_limit
 recommended_concurrency_cap=$concurrency_cap
+recommended_build_jobs=$build_jobs
 EOF
 }
 
-build_release() {
-  echo "Building Backflow in release mode..."
-  clean_cargo_state
+configure_cargo_environment() {
+  local build_jobs="$1"
 
-  if cargo build --release; then
+  export CARGO_BUILD_JOBS="$build_jobs"
+  export CARGO_REGISTRIES_CRATES_IO_PROTOCOL="sparse"
+  export CARGO_NET_GIT_FETCH_WITH_CLI="true"
+}
+
+build_release() {
+  local build_jobs="$1"
+  echo "Building Backflow in release mode..."
+  configure_cargo_environment "$build_jobs"
+
+  if cargo build --release --locked; then
     return
   fi
 
-  echo "Initial build failed. Refreshing toolchain and cleaning Cargo caches before retrying..."
+  echo "Initial build failed. Refreshing the stable toolchain and retrying before deeper cleanup..."
   rustup update stable
   rustup override set stable
   clean_cargo_state
+  if cargo build --release --locked; then
+    return
+  fi
+
+  echo "Retry still failed. Clearing stale Cargo registry state and trying again..."
   clean_cargo_registry_state
-  cargo update
-  cargo build --release
+  if cargo build --release --locked; then
+    return
+  fi
+
+  if [[ ! -f Cargo.lock ]]; then
+    echo "Cargo.lock is missing, refreshing dependency resolution..."
+    cargo update
+    cargo build --release
+    return
+  fi
+
+  echo "Build still failed after automated recovery."
+  return 1
 }
 
 print_next_steps() {
@@ -372,6 +480,7 @@ print_next_steps() {
   local threads="$5"
   local rate_limit="$6"
   local concurrency_cap="$7"
+  local build_jobs="$8"
 
   cat <<EOF
 
@@ -383,6 +492,7 @@ Detected host profile:
 - IPv6 enabled: $ipv6_enabled
 - Open file limit: $fd_limit
 - Pingora worker threads selected: $threads
+- Cargo build jobs selected: $build_jobs
 - Rate-limit baseline selected: $rate_limit requests per 10s
 - Per-IP concurrency cap selected: $concurrency_cap
 
@@ -408,25 +518,27 @@ EOF
 }
 
 main() {
+  resolve_project_root
   prepare_layout
   install_rust
   install_system_build_tools
 
-  local cores mem_mb ipv6_enabled fd_limit threads rate_limit concurrency_cap
+  local cores mem_mb ipv6_enabled fd_limit threads rate_limit concurrency_cap build_jobs
   cores="$(detect_cpu_cores)"
   mem_mb="$(detect_mem_mb)"
   ipv6_enabled="$(detect_ipv6_enabled)"
   fd_limit="$(detect_fd_limit)"
   threads="$(pick_threads "$cores" "$mem_mb")"
+  build_jobs="$(pick_build_jobs "$cores" "$mem_mb")"
   rate_limit="$(pick_rate_limit "$cores" "$mem_mb")"
   concurrency_cap="$(pick_concurrency_cap "$cores")"
 
   render_pingora_config "$threads"
   render_backflow_config "$rate_limit" "$concurrency_cap" "$ipv6_enabled"
   write_runtime_helper
-  write_summary "$cores" "$mem_mb" "$ipv6_enabled" "$fd_limit" "$threads" "$rate_limit" "$concurrency_cap"
-  build_release
-  print_next_steps "$cores" "$mem_mb" "$ipv6_enabled" "$fd_limit" "$threads" "$rate_limit" "$concurrency_cap"
+  write_summary "$cores" "$mem_mb" "$ipv6_enabled" "$fd_limit" "$threads" "$rate_limit" "$concurrency_cap" "$build_jobs"
+  build_release "$build_jobs"
+  print_next_steps "$cores" "$mem_mb" "$ipv6_enabled" "$fd_limit" "$threads" "$rate_limit" "$concurrency_cap" "$build_jobs"
 }
 
 main "$@"

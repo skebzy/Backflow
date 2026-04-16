@@ -107,6 +107,7 @@ ban_action = "blackhole"
 
 [backend]
 inject_headers = { "X-Backflow-Origin-Auth" = "replace-me" }
+set_forwarded_port = true
 strip_inbound_internal_headers = [
   "X-Backflow-Client-IP",
   "X-Backflow-Decision",
@@ -114,5 +115,10 @@ strip_inbound_internal_headers = [
   "X-Forwarded-For",
   "X-Forwarded-Host",
   "X-Forwarded-Proto",
+  "X-Forwarded-Port",
+  "X-Real-IP",
+  "True-Client-IP",
+  "CF-Connecting-IP",
+  "CF-Connecting-IPv6",
   "Forwarded",
 ]

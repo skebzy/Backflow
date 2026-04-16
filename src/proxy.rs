@@ -32,6 +32,7 @@ pub struct BackflowProxy {
     strict_proxy_headers: bool,
     backend_headers: HashMap<String, String>,
     strip_inbound_internal_headers: Vec<String>,
+    set_forwarded_port: bool,
 }
 
 impl BackflowProxy {
@@ -66,6 +67,7 @@ impl BackflowProxy {
             strict_proxy_headers: config.server.strict_proxy_headers,
             backend_headers: config.backend.inject_headers.clone(),
             strip_inbound_internal_headers: config.backend.strip_inbound_internal_headers.clone(),
+            set_forwarded_port: config.backend.set_forwarded_port,
         }
     }
 
@@ -204,21 +206,19 @@ impl BackflowProxy {
         request.client_ip
     }
 
-    fn route_cluster_for<'a>(
+    fn selected_cluster_for<'a>(
         &'a self,
-        host: &str,
-        path: &str,
-    ) -> Result<(&'a str, &'a ClusterConfig, &'a SharedLoadBalancer)> {
-        let pool_name = self.router.select_pool(host, path);
+        ctx: &RequestContext,
+    ) -> Result<(&'a ClusterConfig, &'a SharedLoadBalancer)> {
         let cluster = self
             .pool_configs
-            .get(pool_name)
-            .ok_or_else(|| anyhow!("selected pool {} is missing config", pool_name))?;
+            .get(&ctx.selected_pool)
+            .ok_or_else(|| anyhow!("selected pool {} is missing config", ctx.selected_pool))?;
         let lb = self
             .pools
-            .get(pool_name)
-            .ok_or_else(|| anyhow!("selected pool {} is missing balancer", pool_name))?;
-        Ok((pool_name, cluster, lb))
+            .get(&ctx.selected_pool)
+            .ok_or_else(|| anyhow!("selected pool {} is missing balancer", ctx.selected_pool))?;
+        Ok((cluster, lb))
     }
 }
 
@@ -304,8 +304,10 @@ impl ProxyHttp for BackflowProxy {
             let (cluster, lb) = self.cluster_for(&ctx.decision).map_err(Self::to_pingora_error)?;
             ("sinkhole", cluster, lb)
         } else {
-            self.route_cluster_for(&ctx.host, &ctx.path)
-                .map_err(Self::to_pingora_error)?
+            let (cluster, lb) = self
+                .selected_cluster_for(ctx)
+                .map_err(Self::to_pingora_error)?;
+            (ctx.selected_pool.as_str(), cluster, lb)
         };
         let key = ctx
             .client_ip
@@ -338,10 +340,8 @@ impl ProxyHttp for BackflowProxy {
         let (cluster, _) = if ctx.decision.is_sinkhole() {
             self.cluster_for(&ctx.decision).map_err(Self::to_pingora_error)?
         } else {
-            let (_, cluster, lb) = self
-                .route_cluster_for(&ctx.host, &ctx.path)
-                .map_err(Self::to_pingora_error)?;
-            (cluster, lb)
+            self.selected_cluster_for(ctx)
+                .map_err(Self::to_pingora_error)?
         };
         if self.engine.strip_connection_headers() {
             let connection_tokens = upstream_request
@@ -368,6 +368,11 @@ impl ProxyHttp for BackflowProxy {
                 "X-Forwarded-For",
                 "X-Forwarded-Proto",
                 "X-Forwarded-Host",
+                "X-Forwarded-Port",
+                "X-Real-IP",
+                "True-Client-IP",
+                "CF-Connecting-IP",
+                "CF-Connecting-IPv6",
                 "Forwarded",
             ] {
                 upstream_request.remove_header(header);
@@ -386,6 +391,9 @@ impl ProxyHttp for BackflowProxy {
         }
         upstream_request.insert_header("X-Forwarded-Host", ctx.host.as_str())?;
         upstream_request.insert_header("X-Forwarded-Proto", "http")?;
+        if self.set_forwarded_port {
+            upstream_request.insert_header("X-Forwarded-Port", "80")?;
+        }
         upstream_request.insert_header("X-Backflow-Decision", ctx.decision.label())?;
         upstream_request.insert_header("X-Backflow-Pool", ctx.selected_pool.as_str())?;
         for (header, value) in &self.backend_headers {

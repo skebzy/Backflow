@@ -261,6 +261,8 @@ pub struct BackendConfig {
     pub inject_headers: HashMap<String, String>,
     #[serde(default = "default_strip_inbound_internal_headers")]
     pub strip_inbound_internal_headers: Vec<String>,
+    #[serde(default = "default_true")]
+    pub set_forwarded_port: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -371,6 +373,11 @@ fn default_strip_inbound_internal_headers() -> Vec<String> {
         "X-Forwarded-For",
         "X-Forwarded-Host",
         "X-Forwarded-Proto",
+        "X-Forwarded-Port",
+        "X-Real-IP",
+        "True-Client-IP",
+        "CF-Connecting-IP",
+        "CF-Connecting-IPv6",
         "Forwarded",
     ]
     .into_iter()

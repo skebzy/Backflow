@@ -68,6 +68,7 @@ The example config also shows:
 - routing rules under `[[routes]]`
 - trusted proxy CIDRs plus real-client-IP header precedence for Cloudflare-style setups
 - backend header injection and internal-header stripping for protected origins
+- stricter backend header sanitization for common proxy/CDN client-IP headers
 
 ## One Command On Linux
 
@@ -81,14 +82,17 @@ That command will:
 
 - install Rust with `rustup` if it is missing
 - install the system C build toolchain automatically on common Linux distros when it is missing
-- refresh and select the current stable Rust toolchain before building
+- reuse an already-suitable Rust toolchain instead of reinstalling it every time
 - detect CPU cores, memory, IPv6 availability, and file-descriptor limits
 - build Backflow in release mode
-- automatically clean stale Cargo/build state and retry if the first build fails
+- retry builds in stages so it only does expensive Cargo cleanup when lighter recovery did not work
+- use sparse Cargo registry access and VPS-sized parallel build jobs automatically
 - generate `config/pingora.yaml` to match the detected VPS profile
 - create `config/backflow.toml` with first-run defaults if it does not exist yet
 - create `scripts/run-linux.sh`
 - launch Backflow immediately
+
+If the script reports that `Cargo.toml` exists but `src/main.rs` or `src/lib.rs` does not, the VPS checkout is incomplete or you are inside the wrong directory. Re-clone the repository and rerun the installer.
 
 ## Bootstrap Only
 
@@ -102,10 +106,11 @@ That script will:
 
 - install Rust with `rustup` if it is missing
 - install the system C build toolchain automatically on common Linux distros when it is missing
-- refresh and select the current stable Rust toolchain before building
+- reuse an already-suitable Rust toolchain instead of reinstalling it every time
 - detect CPU cores, memory, IPv6 availability, and file-descriptor limits
 - build Backflow in release mode
-- automatically clean stale Cargo/build state and retry if the first build fails
+- retry builds in stages so it only does expensive Cargo cleanup when lighter recovery did not work
+- use sparse Cargo registry access and VPS-sized parallel build jobs automatically
 - generate `config/pingora.yaml` for the detected host
 - create `config/backflow.toml` with first-run defaults if needed
 - create `scripts/run-linux.sh` as a simple launch helper
