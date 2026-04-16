@@ -1,0 +1,8 @@
+---
+version: 1
+threads: 2
+work_stealing: true
+daemon: false
+error_log: ./logs/backflow-error.log
+upgrade_sock: ./logs/backflow-upgrade.sock
+pid_file: ./logs/backflow.pid

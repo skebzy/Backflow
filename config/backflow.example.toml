@@ -1,0 +1,118 @@
+[server]
+response_server_header = "Backflow"
+trusted_proxies = []
+client_ip_headers = ["CF-Connecting-IPv6", "CF-Connecting-IP", "True-Client-IP", "X-Forwarded-For", "X-Real-IP"]
+strict_proxy_headers = true
+
+[[server.listeners]]
+addr = "0.0.0.0:8080"
+
+#[[server.listeners]]
+#addr = "0.0.0.0:8443"
+#[server.listeners.tls]
+#cert_path = "certs/fullchain.pem"
+#key_path = "certs/privkey.pem"
+#enable_h2 = true
+
+[primary]
+name = "origin"
+host_header = "origin.internal"
+sni = "origin.internal"
+use_tls = false
+peers = [
+  "127.0.0.1:9000",
+  "127.0.0.1:9001",
+]
+
+[pools.api]
+name = "api"
+host_header = "api.internal"
+sni = "api.internal"
+use_tls = false
+peers = [
+  "127.0.0.1:9200",
+  "127.0.0.1:9201",
+]
+
+[[routes]]
+target_pool = "api"
+host_equals = "api.example.com"
+
+[[routes]]
+target_pool = "api"
+path_prefix = "/api/"
+
+[sinkhole]
+enabled = true
+name = "sinkhole"
+host_header = "sinkhole.internal"
+sni = "sinkhole.internal"
+use_tls = false
+peers = [
+  "127.0.0.1:9100",
+]
+
+[health_checks]
+enabled = true
+frequency_secs = 3
+
+[filters]
+default_action = "reject"
+allow_ips = ["127.0.0.1"]
+block_ips = ["2001:db8:dead::/48"]
+allow_hosts = ["example.com", "www.example.com"]
+block_hosts = []
+require_host_header = true
+allow_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+block_user_agents = ["curl/", "python-requests", "go-http-client", "masscan", "zgrab"]
+block_header_names = ["x-original-url", "x-rewrite-url"]
+strip_connection_headers = true
+reject_underscored_headers = true
+reject_multiple_host_headers = true
+max_header_count = 96
+max_header_bytes = 16384
+max_path_length = 2048
+max_query_length = 4096
+max_content_length = 8388608
+max_empty_headers = 8
+max_repeated_path_chars = 24
+max_suspicion_score = 5
+empty_user_agent_score = 1
+odd_method_score = 2
+encoded_path_score = 2
+header_spike_score = 2
+query_spike_score = 2
+empty_header_score = 1
+blocked_ua_score = 3
+repeated_path_score = 2
+reject_status = 403
+reject_body = "blocked by backflow"
+
+[rate_limit]
+enabled = true
+requests_per_period = 120
+burst = 240
+period_secs = 10
+exceeded_action = "sinkhole"
+reject_status = 429
+reject_body = "rate limit exceeded"
+
+[adaptive]
+enabled = true
+max_concurrent_requests_per_ip = 24
+concurrency_action = "sinkhole"
+strike_threshold = 6
+ban_secs = 300
+ban_action = "blackhole"
+
+[backend]
+inject_headers = { "X-Backflow-Origin-Auth" = "replace-me" }
+strip_inbound_internal_headers = [
+  "X-Backflow-Client-IP",
+  "X-Backflow-Decision",
+  "X-Backflow-Pool",
+  "X-Forwarded-For",
+  "X-Forwarded-Host",
+  "X-Forwarded-Proto",
+  "Forwarded",
+]

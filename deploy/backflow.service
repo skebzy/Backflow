@@ -1,0 +1,24 @@
+[Unit]
+Description=Backflow Reverse Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/backflow
+Environment=BACKFLOW_CONFIG=/opt/backflow/config/backflow.toml
+Environment=RUST_LOG=info
+ExecStart=/opt/backflow/target/release/backflow -- -c /opt/backflow/config/pingora.yaml
+Restart=always
+RestartSec=2
+LimitNOFILE=1048576
+TasksMax=infinity
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/backflow/logs
+
+[Install]
+WantedBy=multi-user.target

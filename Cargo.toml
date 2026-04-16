@@ -1,0 +1,28 @@
+[package]
+name = "backflow"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+license = "Apache-2.0"
+description = "Configurable Pingora-based reverse proxy with layered abuse filtering."
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+bytes = "1.7"
+env_logger = "0.11"
+log = "0.4"
+ipnet = "2.10"
+pingora = { version = "0.8.0", features = ["lb"] }
+pingora-core = "0.8.0"
+pingora-http = "0.8.0"
+pingora-load-balancing = "0.8.0"
+pingora-proxy = "0.8.0"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
