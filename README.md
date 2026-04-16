@@ -80,6 +80,7 @@ bash scripts/install-and-run-linux.sh
 That command will:
 
 - install Rust with `rustup` if it is missing
+- install the system C build toolchain automatically on common Linux distros when it is missing
 - refresh and select the current stable Rust toolchain before building
 - detect CPU cores, memory, IPv6 availability, and file-descriptor limits
 - build Backflow in release mode
@@ -100,6 +101,7 @@ bash scripts/bootstrap-linux.sh
 That script will:
 
 - install Rust with `rustup` if it is missing
+- install the system C build toolchain automatically on common Linux distros when it is missing
 - refresh and select the current stable Rust toolchain before building
 - detect CPU cores, memory, IPv6 availability, and file-descriptor limits
 - build Backflow in release mode

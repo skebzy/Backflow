@@ -13,6 +13,59 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+have_sudo() {
+  need_cmd sudo && sudo -n true >/dev/null 2>&1
+}
+
+install_system_build_tools() {
+  if need_cmd cc; then
+    return
+  fi
+
+  echo "C toolchain not found. Installing system build tools..."
+
+  if [[ -f /etc/debian_version ]]; then
+    if have_sudo; then
+      sudo apt-get update
+      sudo apt-get install -y build-essential pkg-config clang
+      return
+    fi
+
+    echo "Missing compiler toolchain. Run:"
+    echo "  sudo apt-get update && sudo apt-get install -y build-essential pkg-config clang"
+    exit 1
+  fi
+
+  if [[ -f /etc/redhat-release ]]; then
+    if have_sudo; then
+      if need_cmd dnf; then
+        sudo dnf install -y gcc gcc-c++ make pkgconf-pkg-config clang
+      else
+        sudo yum install -y gcc gcc-c++ make pkgconfig clang
+      fi
+      return
+    fi
+
+    echo "Missing compiler toolchain. Install gcc/g++/make/pkgconfig/clang with your package manager."
+    exit 1
+  fi
+
+  if [[ -f /etc/alpine-release ]]; then
+    if have_sudo; then
+      sudo apk add --no-cache build-base pkgconf clang
+      return
+    fi
+
+    echo "Missing compiler toolchain. Run:"
+    echo "  sudo apk add --no-cache build-base pkgconf clang"
+    exit 1
+  fi
+
+  echo "Missing compiler toolchain and unsupported distro auto-install path."
+  echo "Install a C compiler toolchain so the 'cc' command exists, then rerun this script."
+  exit 1
+}
+
 clean_cargo_state() {
   echo "Cleaning local Cargo build state..."
   rm -rf target
@@ -357,6 +410,7 @@ EOF
 main() {
   prepare_layout
   install_rust
+  install_system_build_tools
 
   local cores mem_mb ipv6_enabled fd_limit threads rate_limit concurrency_cap
   cores="$(detect_cpu_cores)"
