@@ -78,7 +78,8 @@ impl BackflowProxy {
             .ok_or_else(|| anyhow!("failed to read client address from session"))?;
         let req = session.req_header();
         let path = req.uri.path().to_string();
-        let query_len = req.uri.query().map_or(0, str::len);
+        let query = req.uri.query().unwrap_or_default().to_string();
+        let query_len = query.len();
         let method = req.method.as_str().to_string();
         let host = req
             .headers
@@ -103,13 +104,39 @@ impl BackflowProxy {
             .iter()
             .filter(|(_, value)| value.as_bytes().is_empty())
             .count();
-        let content_length = req
-            .headers
-            .get("Content-Length")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(0);
-        let has_transfer_encoding = req.headers.contains_key("Transfer-Encoding");
+        let content_length_values = req.headers.get_all("Content-Length");
+        let content_length_header_count = content_length_values.iter().count();
+        let mut has_invalid_content_length = false;
+        let mut content_length = 0u64;
+        for value in content_length_values.iter() {
+            match value
+                .to_str()
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+            {
+                Some(parsed) => {
+                    content_length = parsed;
+                }
+                None => {
+                    has_invalid_content_length = true;
+                    break;
+                }
+            }
+        }
+        let transfer_encoding_values = req.headers.get_all("Transfer-Encoding");
+        let transfer_encoding_header_count = transfer_encoding_values.iter().count();
+        let transfer_encoding_tokens = transfer_encoding_values
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let has_transfer_encoding = !transfer_encoding_tokens.is_empty();
+        let has_non_chunked_transfer_encoding = transfer_encoding_tokens
+            .iter()
+            .any(|value| value != "chunked");
         let host_header_count = req.headers.get_all("Host").iter().count();
         let header_names = req
             .headers
@@ -122,23 +149,40 @@ impl BackflowProxy {
             && normalized_host
                 .chars()
                 .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':' ));
+        let has_valid_path = path.starts_with('/');
+        let has_malformed_encoding = crate::filters::has_malformed_percent_encoding(&path)
+            || crate::filters::has_malformed_percent_encoding(&query);
+        let has_path_traversal =
+            crate::filters::has_path_traversal(&path) || crate::filters::has_path_traversal(&query);
+        let path_segment_count = crate::filters::count_path_segments(&path);
+        let query_param_count = crate::filters::count_query_params(&query);
 
         Ok(RequestMeta {
             client_ip: peer_ip,
             method,
             path,
+            query,
             query_len,
             user_agent,
             host,
             header_count,
             header_bytes,
             content_length,
+            content_length_header_count,
+            has_invalid_content_length,
             empty_headers,
             host_header_count,
+            transfer_encoding_header_count,
+            has_non_chunked_transfer_encoding,
             has_underscored_headers,
             header_names,
             has_conflicting_content_headers: has_transfer_encoding && content_length > 0,
             has_valid_host,
+            has_valid_path,
+            path_segment_count,
+            query_param_count,
+            has_path_traversal,
+            has_malformed_encoding,
         })
     }
 

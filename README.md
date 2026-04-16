@@ -9,6 +9,7 @@ Backflow is a modular Rust HTTP reverse proxy built around [Cloudflare Pingora](
 - Supports multiple named upstream pools and routing rules by host and path.
 - Supports an optional sinkhole upstream pool for suspicious traffic.
 - Supports host allow/block rules, method allowlists, header and body sanity checks, anomaly scoring, and sanitized forwarding headers.
+- Adds stronger request-smuggling, traversal, malformed-encoding, exploit-signature, and scanner-path filtering with configurable defaults.
 - Supports CIDR-based IPv4/IPv6 trust and block rules for proxies and client filtering.
 - Supports per-IP token-bucket rate limiting.
 - Supports temporary bans and concurrent request caps with a plain-Rust adaptive state table.

@@ -70,6 +70,14 @@ impl AppConfig {
             bail!("filters.max_suspicion_score must be greater than zero");
         }
 
+        if self.filters.max_path_segments == 0 {
+            bail!("filters.max_path_segments must be greater than zero");
+        }
+
+        if self.filters.max_query_params == 0 {
+            bail!("filters.max_query_params must be greater than zero");
+        }
+
         Ok(())
     }
 }
@@ -161,6 +169,10 @@ pub struct FilterConfig {
     pub block_user_agents: Vec<String>,
     #[serde(default)]
     pub block_header_names: Vec<String>,
+    #[serde(default = "default_block_path_patterns")]
+    pub block_path_patterns: Vec<String>,
+    #[serde(default = "default_block_query_patterns")]
+    pub block_query_patterns: Vec<String>,
     #[serde(default)]
     pub trusted_user_agents: Vec<String>,
     #[serde(default)]
@@ -175,14 +187,32 @@ pub struct FilterConfig {
     pub reject_conflicting_content_headers: bool,
     #[serde(default = "default_true")]
     pub reject_invalid_host_header: bool,
+    #[serde(default = "default_true")]
+    pub reject_invalid_content_length: bool,
+    #[serde(default = "default_true")]
+    pub reject_multiple_content_length_headers: bool,
+    #[serde(default = "default_true")]
+    pub reject_multiple_transfer_encoding_headers: bool,
+    #[serde(default = "default_true")]
+    pub reject_non_chunked_transfer_encoding: bool,
+    #[serde(default = "default_true")]
+    pub reject_malformed_encoding: bool,
+    #[serde(default = "default_true")]
+    pub reject_path_traversal: bool,
+    #[serde(default = "default_true")]
+    pub reject_invalid_path: bool,
     #[serde(default = "default_max_header_count")]
     pub max_header_count: usize,
     #[serde(default = "default_max_header_bytes")]
     pub max_header_bytes: usize,
     #[serde(default = "default_max_path_length")]
     pub max_path_length: usize,
+    #[serde(default = "default_max_path_segments")]
+    pub max_path_segments: usize,
     #[serde(default = "default_max_query_length")]
     pub max_query_length: usize,
+    #[serde(default = "default_max_query_params")]
+    pub max_query_params: usize,
     #[serde(default = "default_max_content_length")]
     pub max_content_length: u64,
     #[serde(default = "default_max_empty_headers")]
@@ -197,6 +227,14 @@ pub struct FilterConfig {
     pub odd_method_score: u32,
     #[serde(default)]
     pub encoded_path_score: u32,
+    #[serde(default = "default_attack_pattern_score")]
+    pub attack_path_score: u32,
+    #[serde(default = "default_attack_pattern_score")]
+    pub attack_query_score: u32,
+    #[serde(default = "default_malformed_encoding_score")]
+    pub malformed_encoding_score: u32,
+    #[serde(default = "default_suspicious_method_override_score")]
+    pub suspicious_method_override_score: u32,
     #[serde(default)]
     pub header_spike_score: u32,
     #[serde(default)]
@@ -301,6 +339,14 @@ fn default_max_query_length() -> usize {
     4096
 }
 
+fn default_max_path_segments() -> usize {
+    48
+}
+
+fn default_max_query_params() -> usize {
+    64
+}
+
 fn default_max_content_length() -> u64 {
     8 * 1024 * 1024
 }
@@ -323,6 +369,18 @@ fn default_reject_status() -> u16 {
 
 fn default_reject_body() -> String {
     "blocked by backflow".to_string()
+}
+
+fn default_attack_pattern_score() -> u32 {
+    3
+}
+
+fn default_malformed_encoding_score() -> u32 {
+    2
+}
+
+fn default_suspicious_method_override_score() -> u32 {
+    2
 }
 
 fn default_requests_per_period() -> u32 {
@@ -350,6 +408,56 @@ fn default_allowed_methods() -> Vec<String> {
         .into_iter()
         .map(str::to_string)
         .collect()
+}
+
+fn default_block_path_patterns() -> Vec<String> {
+    [
+        "/.env",
+        "/.git/",
+        "/.git/config",
+        "/.svn/",
+        "/.hg/",
+        "/wp-admin",
+        "/wp-login.php",
+        "/xmlrpc.php",
+        "/phpmyadmin",
+        "/vendor/phpunit",
+        "/cgi-bin/",
+        "/server-status",
+        "/actuator/env",
+        "/actuator/heapdump",
+        "/autodiscover/autodiscover.xml",
+        "/.aws/",
+        "/.ssh/",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn default_block_query_patterns() -> Vec<String> {
+    [
+        "union select",
+        "<script",
+        "%3cscript",
+        "/etc/passwd",
+        "cmd.exe",
+        "powershell",
+        "${jndi:",
+        "%24%7bjndi",
+        "information_schema",
+        "waitfor delay",
+        "benchmark(",
+        "sleep(",
+        ";wget ",
+        ";curl ",
+        "|wget ",
+        "|curl ",
+        "<?php",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn default_client_ip_headers() -> Vec<String> {

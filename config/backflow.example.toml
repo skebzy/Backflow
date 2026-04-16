@@ -67,13 +67,62 @@ require_host_header = true
 allow_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 block_user_agents = ["curl/", "python-requests", "go-http-client", "masscan", "zgrab"]
 block_header_names = ["x-original-url", "x-rewrite-url"]
+block_path_patterns = [
+  "/.env",
+  "/.git/",
+  "/.git/config",
+  "/.svn/",
+  "/.hg/",
+  "/wp-admin",
+  "/wp-login.php",
+  "/xmlrpc.php",
+  "/phpmyadmin",
+  "/vendor/phpunit",
+  "/cgi-bin/",
+  "/server-status",
+  "/actuator/env",
+  "/actuator/heapdump",
+  "/autodiscover/autodiscover.xml",
+  "/.aws/",
+  "/.ssh/",
+]
+block_query_patterns = [
+  "union select",
+  "<script",
+  "%3cscript",
+  "/etc/passwd",
+  "cmd.exe",
+  "powershell",
+  "${jndi:",
+  "%24%7bjndi",
+  "information_schema",
+  "waitfor delay",
+  "benchmark(",
+  "sleep(",
+  ";wget ",
+  ";curl ",
+  "|wget ",
+  "|curl ",
+  "<?php",
+]
 strip_connection_headers = true
 reject_underscored_headers = true
 reject_multiple_host_headers = true
+reject_conflicting_content_headers = true
+reject_invalid_host_header = true
+reject_invalid_content_length = true
+reject_multiple_content_length_headers = true
+reject_multiple_transfer_encoding_headers = true
+reject_non_chunked_transfer_encoding = true
+reject_malformed_encoding = true
+reject_path_traversal = true
+reject_invalid_path = true
 max_header_count = 96
 max_header_bytes = 16384
 max_path_length = 2048
+max_path_segments = 48
 max_query_length = 4096
+max_query_params = 64
 max_content_length = 8388608
 max_empty_headers = 8
 max_repeated_path_chars = 24
@@ -81,6 +130,10 @@ max_suspicion_score = 5
 empty_user_agent_score = 1
 odd_method_score = 2
 encoded_path_score = 2
+attack_path_score = 3
+attack_query_score = 3
+malformed_encoding_score = 2
+suspicious_method_override_score = 2
 header_spike_score = 2
 query_spike_score = 2
 empty_header_score = 1
