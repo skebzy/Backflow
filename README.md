@@ -80,8 +80,10 @@ bash scripts/install-and-run-linux.sh
 That command will:
 
 - install Rust with `rustup` if it is missing
+- refresh and select the current stable Rust toolchain before building
 - detect CPU cores, memory, IPv6 availability, and file-descriptor limits
 - build Backflow in release mode
+- automatically clean stale Cargo/build state and retry if the first build fails
 - generate `config/pingora.yaml` to match the detected VPS profile
 - create `config/backflow.toml` with first-run defaults if it does not exist yet
 - create `scripts/run-linux.sh`
@@ -98,8 +100,10 @@ bash scripts/bootstrap-linux.sh
 That script will:
 
 - install Rust with `rustup` if it is missing
+- refresh and select the current stable Rust toolchain before building
 - detect CPU cores, memory, IPv6 availability, and file-descriptor limits
 - build Backflow in release mode
+- automatically clean stale Cargo/build state and retry if the first build fails
 - generate `config/pingora.yaml` for the detected host
 - create `config/backflow.toml` with first-run defaults if needed
 - create `scripts/run-linux.sh` as a simple launch helper

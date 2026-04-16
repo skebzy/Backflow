@@ -2,7 +2,7 @@
 name = "backflow"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.84"
+rust-version = "1.85"
 license = "Apache-2.0"
 description = "Configurable Pingora-based reverse proxy with layered abuse filtering."
 

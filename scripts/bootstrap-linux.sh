@@ -13,6 +13,18 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
+clean_cargo_state() {
+  echo "Cleaning local Cargo build state..."
+  rm -rf target
+}
+
+clean_cargo_registry_state() {
+  echo "Cleaning Cargo registry cache and extracted sources..."
+  rm -rf "$HOME/.cargo/registry/index" \
+         "$HOME/.cargo/registry/cache" \
+         "$HOME/.cargo/registry/src"
+}
+
 load_rust_env() {
   if [[ -f "$HOME/.cargo/env" ]]; then
     # shellcheck disable=SC1091
@@ -22,17 +34,21 @@ load_rust_env() {
 
 install_rust() {
   load_rust_env
-  if need_cmd cargo && need_cmd rustc; then
-    return
-  fi
-
   if ! need_cmd curl; then
     echo "Rust is missing and curl is not installed. Install curl or rustup manually first."
     exit 1
   fi
 
-  echo "Rust toolchain not found. Installing rustup..."
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  if ! need_cmd rustup; then
+    echo "Rust toolchain not found. Installing rustup..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    load_rust_env
+  fi
+
+  echo "Refreshing the stable Rust toolchain..."
+  rustup set profile minimal
+  rustup toolchain install stable --component rustfmt --component clippy
+  rustup override set stable
   load_rust_env
 }
 
@@ -280,6 +296,18 @@ EOF
 
 build_release() {
   echo "Building Backflow in release mode..."
+  clean_cargo_state
+
+  if cargo build --release; then
+    return
+  fi
+
+  echo "Initial build failed. Refreshing toolchain and cleaning Cargo caches before retrying..."
+  rustup update stable
+  rustup override set stable
+  clean_cargo_state
+  clean_cargo_registry_state
+  cargo update
   cargo build --release
 }
 

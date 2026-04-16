@@ -39,6 +39,8 @@ The bootstrap scripts automatically detect:
 
 They then use that information to generate the initial `config/pingora.yaml` and first-run `config/backflow.toml` defaults.
 
+The bootstrap also refreshes the current stable Rust toolchain before building. If the first build fails, it automatically cleans local Cargo build state, clears stale registry downloads, updates the lockfile, and retries.
+
 ## Basic rollout steps
 
 1. Install Rust with `rustup`, then build in release mode.
