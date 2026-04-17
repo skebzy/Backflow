@@ -487,6 +487,40 @@ strike_threshold = 6
 ban_secs = 300
 ban_action = "blackhole"
 
+[trace]
+enabled = true
+request_id_header = "X-Request-ID"
+trust_incoming_request_id = true
+inject_correlation_header = true
+
+[response]
+headers = {
+  "X-Content-Type-Options" = "nosniff",
+  "X-Frame-Options" = "DENY",
+  "Referrer-Policy" = "same-origin",
+  "Permissions-Policy" = "geolocation=(), microphone=(), camera=()"
+}
+remove_headers = ["x-powered-by", "server-timing", "alt-svc"]
+
+[maintenance]
+enabled = false
+status = 503
+body = "temporarily unavailable"
+allow_ips = ["127.0.0.1", "::1"]
+allow_path_prefixes = ["/healthz", "/readyz"]
+
+[internal_endpoints]
+enabled = true
+health_path = "/healthz"
+ready_path = "/readyz"
+
+[[protected_paths]]
+path_prefix = "/admin"
+allow_ips = ["127.0.0.1", "::1", "10.0.0.0/8"]
+action = "reject"
+reject_status = 403
+reject_body = "admin access denied"
+
 [backend]
 inject_headers = {}
 strip_inbound_internal_headers = [

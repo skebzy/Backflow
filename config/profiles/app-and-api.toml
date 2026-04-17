@@ -7,22 +7,13 @@ strict_proxy_headers = true
 [[server.listeners]]
 addr = "0.0.0.0:8080"
 
-#[[server.listeners]]
-#addr = "0.0.0.0:8443"
-#[server.listeners.tls]
-#cert_path = "certs/fullchain.pem"
-#key_path = "certs/privkey.pem"
-#enable_h2 = true
-
 [primary]
-name = "origin"
-host_header = "origin.internal"
-sni = "origin.internal"
+name = "app"
+host_header = "app.internal"
+sni = "app.internal"
 use_tls = false
 peers = [
-  # Replace these demo localhost peers with your real origin addresses.
   "127.0.0.1:9000",
-  "127.0.0.1:9001",
 ]
 
 [pools.api]
@@ -32,7 +23,6 @@ sni = "api.internal"
 use_tls = false
 peers = [
   "127.0.0.1:9200",
-  "127.0.0.1:9201",
 ]
 
 [[routes]]
@@ -44,14 +34,7 @@ target_pool = "api"
 path_prefix = "/api/"
 
 [sinkhole]
-enabled = true
-name = "sinkhole"
-host_header = "sinkhole.internal"
-sni = "sinkhole.internal"
-use_tls = false
-peers = [
-  "127.0.0.1:9100",
-]
+enabled = false
 
 [health_checks]
 enabled = true
@@ -59,52 +42,16 @@ frequency_secs = 3
 
 [filters]
 default_action = "reject"
-allow_ips = ["127.0.0.1"]
-block_ips = ["2001:db8:dead::/48"]
-allow_hosts = ["example.com", "www.example.com"]
+allow_ips = []
+block_ips = []
+allow_hosts = ["app.example.com", "api.example.com"]
 block_hosts = []
 require_host_header = true
 allow_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-block_user_agents = ["curl/", "python-requests", "go-http-client", "masscan", "zgrab"]
+block_user_agents = ["masscan", "zgrab", "sqlmap"]
 block_header_names = ["x-original-url", "x-rewrite-url"]
-block_path_patterns = [
-  "/.env",
-  "/.git/",
-  "/.git/config",
-  "/.svn/",
-  "/.hg/",
-  "/wp-admin",
-  "/wp-login.php",
-  "/xmlrpc.php",
-  "/phpmyadmin",
-  "/vendor/phpunit",
-  "/cgi-bin/",
-  "/server-status",
-  "/actuator/env",
-  "/actuator/heapdump",
-  "/autodiscover/autodiscover.xml",
-  "/.aws/",
-  "/.ssh/",
-]
-block_query_patterns = [
-  "union select",
-  "<script",
-  "%3cscript",
-  "/etc/passwd",
-  "cmd.exe",
-  "powershell",
-  "${jndi:",
-  "%24%7bjndi",
-  "information_schema",
-  "waitfor delay",
-  "benchmark(",
-  "sleep(",
-  ";wget ",
-  ";curl ",
-  "|wget ",
-  "|curl ",
-  "<?php",
-]
+trusted_user_agents = []
+skip_rate_limit_paths = ["/healthz", "/readyz"]
 strip_connection_headers = true
 reject_underscored_headers = true
 reject_multiple_host_headers = true
@@ -147,14 +94,14 @@ enabled = true
 requests_per_period = 120
 burst = 240
 period_secs = 10
-exceeded_action = "sinkhole"
+exceeded_action = "reject"
 reject_status = 429
 reject_body = "rate limit exceeded"
 
 [adaptive]
 enabled = true
 max_concurrent_requests_per_ip = 24
-concurrency_action = "sinkhole"
+concurrency_action = "reject"
 strike_threshold = 6
 ban_secs = 300
 ban_action = "blackhole"
@@ -194,7 +141,7 @@ reject_status = 403
 reject_body = "admin access denied"
 
 [backend]
-inject_headers = { "X-Backflow-Origin-Auth" = "replace-me" }
+inject_headers = {}
 set_forwarded_port = true
 strip_inbound_internal_headers = [
   "X-Backflow-Client-IP",

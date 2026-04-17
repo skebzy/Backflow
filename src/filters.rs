@@ -629,7 +629,7 @@ impl Decision {
     }
 }
 
-fn parse_ip_rules(values: &[String]) -> Vec<IpNet> {
+pub(crate) fn parse_ip_rules(values: &[String]) -> Vec<IpNet> {
     values
         .iter()
         .filter_map(|value| {
@@ -848,6 +848,11 @@ mod tests {
                 ban_action: TrafficAction::Blackhole,
             },
             backend: crate::config::BackendConfig::default(),
+            trace: crate::config::TraceConfig::default(),
+            response: crate::config::ResponseConfig::default(),
+            maintenance: crate::config::MaintenanceConfig::default(),
+            internal_endpoints: crate::config::InternalEndpointsConfig::default(),
+            protected_paths: vec![],
         }
     }
 

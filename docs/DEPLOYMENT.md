@@ -46,11 +46,13 @@ The bootstrap also installs the native build toolchain, including `cmake`, `pkg-
 ## Basic rollout steps
 
 1. Install Rust with `rustup`, then build in release mode.
-2. Copy `config/backflow.example.toml` to `config/backflow.toml`.
+2. Start from `config/profiles/single-origin.toml`, `config/profiles/app-and-api.toml`, or `config/backflow.example.toml`.
 3. Restrict `allow_hosts` to the exact domains you serve.
 4. Point `primary.peers` at your real origin addresses.
 5. Either disable sinkhole mode or point `sinkhole.peers` at a cheap internal responder.
 6. Run with `RUST_LOG=info` at first, then reduce verbosity if logs become noisy.
+7. Use `bash scripts/smoke-test.sh` once the proxy is up so you verify both normal traffic and blocked probes.
+8. Lock down `[[protected_paths]]` for admin or internal-only routes before exposing the host.
 
 ## System-level hardening that still matters
 

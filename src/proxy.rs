@@ -1,4 +1,14 @@
-use std::{collections::HashMap, net::IpAddr, str::FromStr, sync::Arc};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
+    hash::{Hash, Hasher},
+    net::IpAddr,
+    str::FromStr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -10,12 +20,14 @@ use pingora_http::ResponseHeader;
 use pingora_proxy::{ProxyHttp, Session};
 
 use crate::{
-    config::{AppConfig, ClusterConfig},
+    config::{AppConfig, ClusterConfig, ProtectedPathConfig, TrafficAction},
     filters::{Decision, FilterEngine, RequestMeta},
     routing::Router,
     sinkhole::SharedLoadBalancer,
     state::{DefenseState, StateDecision},
 };
+
+static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct BackflowProxy {
     engine: Arc<FilterEngine>,
@@ -33,6 +45,15 @@ pub struct BackflowProxy {
     backend_headers: HashMap<String, String>,
     strip_inbound_internal_headers: Vec<String>,
     set_forwarded_port: bool,
+    trace_enabled: bool,
+    request_id_header: String,
+    trust_incoming_request_id: bool,
+    inject_correlation_header: bool,
+    response_headers: HashMap<String, String>,
+    remove_response_headers: Vec<String>,
+    maintenance: MaintenanceRuntime,
+    internal_endpoints: InternalEndpointsRuntime,
+    protected_paths: Vec<ProtectedPathRuntime>,
 }
 
 impl BackflowProxy {
@@ -68,6 +89,19 @@ impl BackflowProxy {
             backend_headers: config.backend.inject_headers.clone(),
             strip_inbound_internal_headers: config.backend.strip_inbound_internal_headers.clone(),
             set_forwarded_port: config.backend.set_forwarded_port,
+            trace_enabled: config.trace.enabled,
+            request_id_header: config.trace.request_id_header.clone(),
+            trust_incoming_request_id: config.trace.trust_incoming_request_id,
+            inject_correlation_header: config.trace.inject_correlation_header,
+            response_headers: config.response.headers.clone(),
+            remove_response_headers: config.response.remove_headers.clone(),
+            maintenance: MaintenanceRuntime::from_config(&config.maintenance),
+            internal_endpoints: InternalEndpointsRuntime::from_config(&config.internal_endpoints),
+            protected_paths: config
+                .protected_paths
+                .iter()
+                .map(ProtectedPathRuntime::from_config)
+                .collect(),
         }
     }
 
@@ -264,6 +298,143 @@ impl BackflowProxy {
             .ok_or_else(|| anyhow!("selected pool {} is missing balancer", ctx.selected_pool))?;
         Ok((cluster, lb))
     }
+
+    fn current_request_id(&self, session: &Session) -> Option<String> {
+        if !self.trace_enabled {
+            return None;
+        }
+
+        if self.trust_incoming_request_id {
+            if let Some(value) = session.req_header().headers.get(self.request_id_header.as_str()) {
+                if let Ok(value) = value.to_str() {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+        }
+
+        Some(Self::generate_request_id(
+            session
+                .client_addr()
+                .and_then(|addr| addr.as_inet().map(|addr| addr.ip())),
+        ))
+    }
+
+    fn generate_request_id(client_ip: Option<IpAddr>) -> String {
+        let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis() as u64);
+        let mut hasher = DefaultHasher::new();
+        client_ip.hash(&mut hasher);
+        counter.hash(&mut hasher);
+        millis.hash(&mut hasher);
+        format!("{millis:016x}{counter:08x}{:016x}", hasher.finish())
+    }
+
+    fn is_ready(&self) -> bool {
+        self.pools
+            .get(&self.default_pool)
+            .and_then(|pool| pool.select(b"readyz", 256))
+            .is_some()
+    }
+
+    async fn maybe_handle_internal_endpoint(
+        &self,
+        session: &mut Session,
+        request: &RequestMeta,
+        ctx: &mut RequestContext,
+    ) -> pingora_core::Result<bool> {
+        if !self.internal_endpoints.enabled {
+            return Ok(false);
+        }
+
+        if request.path == self.internal_endpoints.health_path {
+            ctx.decision = Decision::allow();
+            session
+                .respond_error_with_body(200, Bytes::from_static(b"{\"status\":\"ok\"}"))
+                .await?;
+            return Ok(true);
+        }
+
+        if request.path == self.internal_endpoints.ready_path {
+            ctx.decision = Decision::allow();
+            let status = if self.is_ready() { 200 } else { 503 };
+            let body = if status == 200 {
+                Bytes::from_static(b"{\"status\":\"ready\"}")
+            } else {
+                Bytes::from_static(b"{\"status\":\"degraded\"}")
+            };
+            session.respond_error_with_body(status, body).await?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    fn maintenance_decision(&self, request: &RequestMeta) -> Option<Decision> {
+        if !self.maintenance.enabled {
+            return None;
+        }
+
+        if self
+            .maintenance
+            .allow_path_prefixes
+            .iter()
+            .any(|prefix| request.path.starts_with(prefix))
+        {
+            return None;
+        }
+
+        if self
+            .maintenance
+            .allow_ips
+            .iter()
+            .any(|network| network.contains(&request.client_ip))
+        {
+            return None;
+        }
+
+        Some(Decision::Reject {
+            status: self.maintenance.status,
+            body: self.maintenance.body.clone(),
+            reason: "maintenance mode enabled".to_string(),
+        })
+    }
+
+    fn protected_path_decision(&self, request: &RequestMeta) -> Option<Decision> {
+        for rule in &self.protected_paths {
+            if !request.path.starts_with(&rule.path_prefix) {
+                continue;
+            }
+
+            if rule
+                .allow_ips
+                .iter()
+                .any(|network| network.contains(&request.client_ip))
+            {
+                return None;
+            }
+
+            return Some(match rule.action {
+                TrafficAction::Reject => Decision::Reject {
+                    status: rule.reject_status,
+                    body: rule.reject_body.clone(),
+                    reason: format!("protected path {} denied", rule.path_prefix),
+                },
+                TrafficAction::Sinkhole => Decision::Sinkhole {
+                    reason: format!("protected path {} denied", rule.path_prefix),
+                },
+                TrafficAction::Blackhole => Decision::Blackhole {
+                    reason: format!("protected path {} denied", rule.path_prefix),
+                },
+            });
+        }
+
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -274,6 +445,7 @@ pub struct RequestContext {
     pub decision: Decision,
     pub counted_concurrency: bool,
     pub selected_pool: String,
+    pub request_id: Option<String>,
 }
 
 #[async_trait]
@@ -288,6 +460,7 @@ impl ProxyHttp for BackflowProxy {
             decision: Decision::allow(),
             counted_concurrency: false,
             selected_pool: String::new(),
+            request_id: None,
         }
     }
 
@@ -304,6 +477,27 @@ impl ProxyHttp for BackflowProxy {
         ctx.host = request.host.clone();
         ctx.path = request.path.clone();
         ctx.selected_pool = self.router.select_pool(&request.host, &request.path).to_string();
+        ctx.request_id = self.current_request_id(session);
+
+        if self
+            .maybe_handle_internal_endpoint(session, &request, ctx)
+            .await?
+        {
+            return Ok(true);
+        }
+
+        if let Some(decision) = self.maintenance_decision(&request) {
+            ctx.decision = decision;
+            return self.handle_decision(session, ctx, &request).await;
+        }
+
+        if let Some(decision) = self.protected_path_decision(&request) {
+            ctx.decision = decision;
+            if matches!(ctx.decision, Decision::Reject { .. } | Decision::Blackhole { .. }) {
+                let _ = self.state.record_infraction(request.client_ip, ctx.decision.reason());
+            }
+            return self.handle_decision(session, ctx, &request).await;
+        }
 
         match self.state.start_request(request.client_ip) {
             StateDecision::Allow { counted, .. } => {
@@ -440,6 +634,12 @@ impl ProxyHttp for BackflowProxy {
         }
         upstream_request.insert_header("X-Backflow-Decision", ctx.decision.label())?;
         upstream_request.insert_header("X-Backflow-Pool", ctx.selected_pool.as_str())?;
+        if let Some(request_id) = &ctx.request_id {
+            upstream_request.insert_header(self.request_id_header.as_str(), request_id.as_str())?;
+            if self.inject_correlation_header {
+                upstream_request.insert_header("X-Correlation-ID", request_id.as_str())?;
+            }
+        }
         for (header, value) in &self.backend_headers {
             upstream_request.insert_header(header.clone(), value.clone())?;
         }
@@ -458,7 +658,15 @@ impl ProxyHttp for BackflowProxy {
         upstream_response.insert_header("Server", self.server_header.as_str())?;
         upstream_response.insert_header("X-Backflow-Decision", ctx.decision.label())?;
         upstream_response.insert_header("X-Backflow-Reason", ctx.decision.reason())?;
-        upstream_response.remove_header("alt-svc");
+        if let Some(request_id) = &ctx.request_id {
+            upstream_response.insert_header(self.request_id_header.as_str(), request_id.as_str())?;
+        }
+        for (header, value) in &self.response_headers {
+            upstream_response.insert_header(header.as_str(), value.as_str())?;
+        }
+        for header in &self.remove_response_headers {
+            upstream_response.remove_header(header.as_str());
+        }
         Ok(())
     }
 
@@ -524,6 +732,62 @@ impl BackflowProxy {
                 session.shutdown().await;
                 Ok(true)
             }
+        }
+    }
+}
+
+struct MaintenanceRuntime {
+    enabled: bool,
+    status: u16,
+    body: String,
+    allow_ips: Vec<IpNet>,
+    allow_path_prefixes: Vec<String>,
+}
+
+impl MaintenanceRuntime {
+    fn from_config(config: &crate::config::MaintenanceConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            status: config.status,
+            body: config.body.clone(),
+            allow_ips: crate::filters::parse_ip_rules(&config.allow_ips),
+            allow_path_prefixes: config.allow_path_prefixes.clone(),
+        }
+    }
+}
+
+struct InternalEndpointsRuntime {
+    enabled: bool,
+    health_path: String,
+    ready_path: String,
+}
+
+impl InternalEndpointsRuntime {
+    fn from_config(config: &crate::config::InternalEndpointsConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            health_path: config.health_path.clone(),
+            ready_path: config.ready_path.clone(),
+        }
+    }
+}
+
+struct ProtectedPathRuntime {
+    path_prefix: String,
+    allow_ips: Vec<IpNet>,
+    action: TrafficAction,
+    reject_status: u16,
+    reject_body: String,
+}
+
+impl ProtectedPathRuntime {
+    fn from_config(config: &ProtectedPathConfig) -> Self {
+        Self {
+            path_prefix: config.path_prefix.clone(),
+            allow_ips: crate::filters::parse_ip_rules(&config.allow_ips),
+            action: config.action,
+            reject_status: config.reject_status,
+            reject_body: config.reject_body.clone(),
         }
     }
 }

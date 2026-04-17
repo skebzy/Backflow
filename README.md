@@ -1,159 +1,189 @@
 # Backflow
 
-Backflow is a modular Rust HTTP reverse proxy built around [Cloudflare Pingora](https://github.com/cloudflare/pingora), with some hot-path defense logic implemented directly in plain Rust so the filtering behavior stays fast, explicit, and easy to extend.
+Backflow is a small Rust reverse proxy for people who want to put a stricter HTTP edge in front of a private app, API, or self-hosted service without dragging in a giant control plane.
 
-## What this version does
+It is built on [Cloudflare Pingora](https://github.com/cloudflare/pingora), but the value of this project is not "Pingora in a different wrapper." The point is to ship a focused edge proxy that does a few things well:
 
-- Uses Pingora as the HTTP/HTTPS reverse proxy engine.
-- Routes traffic to a primary upstream pool.
-- Supports multiple named upstream pools and routing rules by host and path.
-- Supports an optional sinkhole upstream pool for suspicious traffic.
-- Supports host allow/block rules, method allowlists, header and body sanity checks, anomaly scoring, and sanitized forwarding headers.
-- Adds stronger request-smuggling, traversal, malformed-encoding, exploit-signature, and scanner-path filtering with configurable defaults.
-- Supports CIDR-based IPv4/IPv6 trust and block rules for proxies and client filtering.
-- Supports per-IP token-bucket rate limiting.
-- Supports temporary bans and concurrent request caps with a plain-Rust adaptive state table.
-- Supports health checks for upstream pools.
-- Supports optional TLS termination on the proxy listener.
-- Supports backend-facing header injection/stripping so origins can trust proxy-added metadata.
+- routes HTTP traffic to one or more private upstreams
+- rejects a lot of noisy or hostile traffic early
+- keeps backend-facing headers predictable
+- stays readable enough that you can actually change the rules
+- exposes built-in health and readiness endpoints
+- propagates request IDs for tracing across the edge and origin
+- supports maintenance windows and IP-protected path prefixes
 
-## Design target
+This is a Linux-first project. Windows is fine for editing and experimenting, but if you are putting this on the internet, assume Linux is the real target.
 
-Backflow is aimed at being a hardened HTTP reverse proxy for Linux servers, especially smaller VPS deployments where you want something fast, controlled, and readable rather than a huge appliance. It still does not replace upstream network scrubbing, host firewalling, or kernel tuning.
+## What It Is Good For
 
-Pingora is primarily an HTTP-focused framework, so this project stays honest about that scope and focuses on application-layer filtering done well.
+Backflow makes the most sense when you have a small number of services and you care more about edge hygiene than about having a full gateway platform.
 
-## Project layout
+Good fits:
 
-```text
-backflow/
-|-- Cargo.toml
-|-- config/
-|   |-- backflow.example.toml
-|   `-- pingora.yaml
-|-- deploy/
-|   |-- backflow.service
-|   `-- backflow.sysctl.conf
-|-- docs/
-|   |-- DEPLOYMENT.md
-|   `-- FILTERING.md
-|-- scripts/
-|   `-- bootstrap-linux.sh
-`-- src/
-    |-- app.rs
-    |-- config.rs
-    |-- filters.rs
-    |-- lib.rs
-    |-- main.rs
-    |-- proxy.rs
-    |-- rate_limit.rs
-    |-- sinkhole.rs
-    `-- state.rs
-```
+- a single VPS running a private app on `127.0.0.1:9000`
+- one public hostname for the app and another for the API
+- a service behind Cloudflare or another upstream proxy where you still want strict origin-side request filtering
+- an origin that keeps getting hammered by scanners, cheap bots, exploit probes, or junk traffic
 
-## Configuration
+Bad fits:
 
-Backflow reads its own TOML config from `BACKFLOW_CONFIG`, or falls back to `config/backflow.toml`.
+- L4 DDoS defense
+- huge dynamic service discovery setups
+- Kubernetes ingress replacement
+- environments where you mainly want a polished UI and batteries-included certificate automation
 
-Copy the example first:
+## Why Use This Instead Of Something Else
 
-```powershell
-Copy-Item config/backflow.example.toml config/backflow.toml
-```
+### Backflow vs Nginx
 
-Pingora's own server/runtime config remains separate in `config/pingora.yaml` and is passed through Pingora's built-in CLI flags. This keeps process-level tuning separate from request-defense policy.
+Nginx is still the default answer for a reason. It is mature, fast, and everywhere.
 
-The example config also shows:
+Backflow is better when you want:
 
-- named pools under `pools.*`
-- routing rules under `[[routes]]`
-- trusted proxy CIDRs plus real-client-IP header precedence for Cloudflare-style setups
-- backend header injection and internal-header stripping for protected origins
-- stricter backend header sanitization for common proxy/CDN client-IP headers
+- a codebase built around request filtering as a first-class concern instead of a pile of location blocks
+- clearer control over suspicious-request scoring, sinkholing, and adaptive bans
+- a smaller project surface dedicated to "protect the origin and route traffic"
 
-## One Command On Linux
+Nginx is better when you want:
 
-After cloning the repo:
+- broad ecosystem support
+- lots of battle-tested modules
+- a tool your whole team already knows
+
+### Backflow vs Caddy
+
+Caddy is easier when TLS automation and quick setup matter most.
+
+Backflow is better when you want a more opinionated hostile-edge proxy with stricter request validation and custom abuse logic.
+
+### Backflow vs Traefik or Envoy
+
+Traefik and Envoy are stronger choices when you need service discovery, richer gateway features, or bigger platform integration.
+
+Backflow is better when you want a smaller box:
+
+- static config
+- predictable routing
+- focused filtering
+- no control-plane story to babysit
+
+## Real Use Cases
+
+### 1. Shield a private web app on one VPS
+
+- Backflow listens on `:80` or `:443`
+- your real app stays on `127.0.0.1:9000`
+- Backflow filters junk requests before they hit the app
+
+Start with: `config/profiles/single-origin.toml`
+
+### 2. Split app and API traffic cleanly
+
+- `app.example.com` goes to one upstream pool
+- `api.example.com` or `/api/` goes to another
+- you keep one small edge process instead of separate front doors
+
+Start with: `config/profiles/app-and-api.toml`
+
+### 3. Put a stricter origin behind Cloudflare
+
+- trust only Cloudflare CIDRs
+- extract the real client IP from forwarded headers
+- keep scanner junk and malformed requests away from your origin app
+
+The example config shows the trust and header model. The filtering model is explained in `docs/FILTERING.md`.
+
+## Quick Start
+
+On Linux:
 
 ```bash
 bash scripts/install-and-run-linux.sh
 ```
 
-That command will:
+That bootstrap path installs the toolchain if needed, builds Backflow, writes a runnable config when one does not exist, and starts the proxy. If the generated config still points at the default localhost origin, the helper script starts a tiny demo origin so you can verify the proxy path before wiring in your real app.
 
-- install Rust with `rustup` if it is missing
-- install the system C build toolchain automatically on common Linux distros when it is missing
-- install `cmake` automatically when native Rust dependencies need it
-- install common native dependency helpers like `pkg-config`, `perl`, OpenSSL headers, and CA certificates
-- reuse an already-suitable Rust toolchain instead of reinstalling it every time
-- detect CPU cores, memory, IPv6 availability, and file-descriptor limits
-- build Backflow in release mode
-- retry builds in stages so it only does expensive Cargo cleanup when lighter recovery did not work
-- use sparse Cargo registry access and VPS-sized parallel build jobs automatically
-- generate `config/pingora.yaml` to match the detected VPS profile
-- create `config/backflow.toml` with first-run defaults if it does not exist yet
-- create a tiny localhost demo origin for first-run traffic when `primary.peers` still points at `127.0.0.1:9000`
-- create `scripts/run-linux.sh`
-- launch Backflow immediately
-
-If the script reports that `Cargo.toml` exists but `src/main.rs` or `src/lib.rs` does not, the VPS checkout is incomplete or you are inside the wrong directory. Re-clone the repository and rerun the installer.
-
-## Bootstrap Only
-
-If you want to build first and launch later:
+If you want to bootstrap without starting the process yet:
 
 ```bash
 bash scripts/bootstrap-linux.sh
 ```
 
-That script will:
+Then copy a profile or the example config:
 
-- install Rust with `rustup` if it is missing
-- install the system C build toolchain automatically on common Linux distros when it is missing
-- install `cmake` automatically when native Rust dependencies need it
-- install common native dependency helpers like `pkg-config`, `perl`, OpenSSL headers, and CA certificates
-- reuse an already-suitable Rust toolchain instead of reinstalling it every time
-- detect CPU cores, memory, IPv6 availability, and file-descriptor limits
-- build Backflow in release mode
-- retry builds in stages so it only does expensive Cargo cleanup when lighter recovery did not work
-- use sparse Cargo registry access and VPS-sized parallel build jobs automatically
-- generate `config/pingora.yaml` for the detected host
-- create `config/backflow.toml` with first-run defaults if needed
-- create a tiny localhost demo origin helper for first-run traffic on `127.0.0.1:9000`
-- create `scripts/run-linux.sh` as a simple launch helper
-
-The detected bootstrap summary is also written to `logs/bootstrap-summary.txt`.
-
-## Running
-
-Once Rust is installed:
-
-```powershell
-$env:BACKFLOW_CONFIG = "config/backflow.toml"
-$env:RUST_LOG = "info"
-cargo run -- -c config/pingora.yaml
+```bash
+cp config/profiles/single-origin.toml config/backflow.toml
 ```
 
-If `config/backflow.toml` still uses the generated `127.0.0.1:9000` peer, `scripts/run-linux.sh` now starts a tiny local demo origin automatically so the proxy is immediately usable on first boot. Replace `primary.peers` with your real application as soon as you are ready.
+Point `primary.peers` at your real service and run:
 
-## Install Rust on Windows
-
-If you do not already have Rust:
-
-1. Install `rustup` from [rustup.rs](https://rustup.rs/).
-2. Open a new shell.
-3. Confirm:
-
-```powershell
-rustc --version
-cargo --version
+```bash
+bash scripts/run-linux.sh
 ```
 
-## Notes about Pingora on Windows
+## Smoke Test
 
-Pingora's own documentation says Linux is the tier-1 environment and Windows support is still preliminary. Development on Windows can still be fine, but for production you should expect Linux to be the target environment.
+Once the proxy is running:
 
-## Additional docs
+```bash
+bash scripts/smoke-test.sh http://127.0.0.1:8080
+```
 
-- `docs/DEPLOYMENT.md` explains the intended Linux deployment model.
-- `docs/FILTERING.md` explains how filtering decisions are made.
+That script checks that normal traffic passes and a few common hostile requests get blocked.
+
+## Features That Matter In Practice
+
+- Built-in `/healthz` and `/readyz` endpoints so you can plug Backflow into simple uptime checks and process supervision.
+- Request ID propagation via `X-Request-ID` and `X-Correlation-ID` so backend logs can be tied back to edge traffic.
+- Maintenance mode with allowlisted IPs and allowed path prefixes for controlled rollouts.
+- Path-level protection rules for things like `/admin`, internal dashboards, or debug endpoints.
+- Configurable response header hardening so you can strip noisy upstream headers and add sane browser-facing defaults.
+
+## Repo Map
+
+The structure is small on purpose.
+
+- `config/`: runnable proxy configs and copy-paste starting points
+- `config/profiles/`: practical starting configs for common deployments
+- `scripts/`: bootstrap, run, and smoke-test helpers
+- `deploy/`: systemd and sysctl files for a real Linux host
+- `docs/`: operator docs, filtering notes, and deployment guidance
+- `src/`: the actual proxy, routing, filtering, rate-limit, and adaptive-defense code
+
+There is no big "platform" layer here because the project is meant to stay understandable. If you need a graph of ten subsystems to reason about the edge, this stops being the kind of tool Backflow is trying to be.
+
+## Configuration
+
+Backflow reads its policy config from `BACKFLOW_CONFIG` and defaults to `config/backflow.toml`.
+
+Pingora runtime settings stay in `config/pingora.yaml`. That split is intentional:
+
+- `backflow.toml` is about traffic policy and upstream behavior
+- `pingora.yaml` is about process-level runtime tuning
+
+If you are starting from scratch, use one of these:
+
+- `config/profiles/single-origin.toml`
+- `config/profiles/app-and-api.toml`
+- `config/backflow.example.toml`
+
+Useful config sections beyond filters:
+
+- `[trace]`
+- `[response]`
+- `[maintenance]`
+- `[internal_endpoints]`
+- `[[protected_paths]]`
+
+## Operational Notes
+
+- This helps with abusive HTTP traffic, not link saturation.
+- Keep the real origin bound to localhost or private addresses.
+- Put it under `systemd` if it matters.
+- Use upstream filtering too if you are exposed to serious traffic.
+
+## Further Reading
+
+- `docs/DEPLOYMENT.md`
+- `docs/FILTERING.md`
+- `docs/USE_CASES.md`

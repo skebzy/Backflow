@@ -18,6 +18,16 @@ pub struct AppConfig {
     pub adaptive: AdaptiveDefenseConfig,
     #[serde(default)]
     pub backend: BackendConfig,
+    #[serde(default)]
+    pub trace: TraceConfig,
+    #[serde(default)]
+    pub response: ResponseConfig,
+    #[serde(default)]
+    pub maintenance: MaintenanceConfig,
+    #[serde(default)]
+    pub internal_endpoints: InternalEndpointsConfig,
+    #[serde(default)]
+    pub protected_paths: Vec<ProtectedPathConfig>,
 }
 
 impl AppConfig {
@@ -76,6 +86,21 @@ impl AppConfig {
 
         if self.filters.max_query_params == 0 {
             bail!("filters.max_query_params must be greater than zero");
+        }
+
+        if self.trace.enabled && self.trace.request_id_header.trim().is_empty() {
+            bail!("trace.request_id_header must not be empty when trace is enabled");
+        }
+
+        if self.internal_endpoints.enabled
+            && (self.internal_endpoints.health_path.trim().is_empty()
+                || self.internal_endpoints.ready_path.trim().is_empty())
+        {
+            bail!("internal_endpoints health and ready paths must not be empty");
+        }
+
+        for rule in &self.protected_paths {
+            rule.validate()?;
         }
 
         Ok(())
@@ -303,6 +328,120 @@ pub struct BackendConfig {
     pub set_forwarded_port: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct TraceConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_request_id_header")]
+    pub request_id_header: String,
+    #[serde(default = "default_true")]
+    pub trust_incoming_request_id: bool,
+    #[serde(default = "default_true")]
+    pub inject_correlation_header: bool,
+}
+
+impl Default for TraceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            request_id_header: default_request_id_header(),
+            trust_incoming_request_id: true,
+            inject_correlation_header: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResponseConfig {
+    #[serde(default = "default_security_headers")]
+    pub headers: HashMap<String, String>,
+    #[serde(default = "default_remove_response_headers")]
+    pub remove_headers: Vec<String>,
+}
+
+impl Default for ResponseConfig {
+    fn default() -> Self {
+        Self {
+            headers: default_security_headers(),
+            remove_headers: default_remove_response_headers(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MaintenanceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_maintenance_status")]
+    pub status: u16,
+    #[serde(default = "default_maintenance_body")]
+    pub body: String,
+    #[serde(default)]
+    pub allow_ips: Vec<String>,
+    #[serde(default = "default_maintenance_allow_paths")]
+    pub allow_path_prefixes: Vec<String>,
+}
+
+impl Default for MaintenanceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            status: default_maintenance_status(),
+            body: default_maintenance_body(),
+            allow_ips: Vec::new(),
+            allow_path_prefixes: default_maintenance_allow_paths(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct InternalEndpointsConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_health_path")]
+    pub health_path: String,
+    #[serde(default = "default_ready_path")]
+    pub ready_path: String,
+}
+
+impl Default for InternalEndpointsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            health_path: default_health_path(),
+            ready_path: default_ready_path(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProtectedPathConfig {
+    pub path_prefix: String,
+    #[serde(default)]
+    pub allow_ips: Vec<String>,
+    #[serde(default = "default_filter_action")]
+    pub action: TrafficAction,
+    #[serde(default = "default_reject_status")]
+    pub reject_status: u16,
+    #[serde(default = "default_protected_path_body")]
+    pub reject_body: String,
+}
+
+impl ProtectedPathConfig {
+    fn validate(&self) -> Result<()> {
+        if self.path_prefix.trim().is_empty() {
+            bail!("protected_paths.path_prefix cannot be empty");
+        }
+        if self.allow_ips.is_empty() {
+            bail!(
+                "protected path {} must define at least one allow_ips entry",
+                self.path_prefix
+            );
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TrafficAction {
@@ -371,6 +510,10 @@ fn default_reject_body() -> String {
     "blocked by backflow".to_string()
 }
 
+fn default_protected_path_body() -> String {
+    "forbidden".to_string()
+}
+
 fn default_attack_pattern_score() -> u32 {
     3
 }
@@ -401,6 +544,52 @@ fn default_rate_limit_status() -> u16 {
 
 fn default_rate_limit_body() -> String {
     "rate limit exceeded".to_string()
+}
+
+fn default_request_id_header() -> String {
+    "X-Request-ID".to_string()
+}
+
+fn default_security_headers() -> HashMap<String, String> {
+    [
+        ("X-Content-Type-Options", "nosniff"),
+        ("X-Frame-Options", "DENY"),
+        ("Referrer-Policy", "same-origin"),
+        ("Permissions-Policy", "geolocation=(), microphone=(), camera=()"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value.to_string()))
+    .collect()
+}
+
+fn default_remove_response_headers() -> Vec<String> {
+    ["x-powered-by", "server-timing", "alt-svc"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn default_maintenance_status() -> u16 {
+    503
+}
+
+fn default_maintenance_body() -> String {
+    "temporarily unavailable".to_string()
+}
+
+fn default_maintenance_allow_paths() -> Vec<String> {
+    ["/healthz", "/readyz"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+fn default_health_path() -> String {
+    "/healthz".to_string()
+}
+
+fn default_ready_path() -> String {
+    "/readyz".to_string()
 }
 
 fn default_allowed_methods() -> Vec<String> {
