@@ -12,6 +12,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub routes: Vec<RouteConfig>,
     pub sinkhole: SinkholeConfig,
+    #[serde(default)]
+    pub blackhole: BlackholeConfig,
     pub health_checks: HealthCheckConfig,
     pub filters: FilterConfig,
     pub rate_limit: RateLimitConfig,
@@ -51,12 +53,11 @@ impl AppConfig {
             pool.validate(name)?;
         }
 
-        if self.sinkhole.enabled {
-            let cluster = self
-                .sinkhole
-                .cluster
-                .as_ref()
-                .context("sinkhole.enabled is true but sinkhole cluster settings are missing")?;
+        if self.sinkhole.enabled && matches!(self.sinkhole.mode, SinkholeMode::Proxy) {
+            let cluster =
+                self.sinkhole.cluster.as_ref().context(
+                    "sinkhole.enabled with mode=proxy requires sinkhole cluster settings",
+                )?;
             cluster.validate("sinkhole")?;
         }
 
@@ -90,6 +91,10 @@ impl AppConfig {
 
         if self.trace.enabled && self.trace.request_id_header.trim().is_empty() {
             bail!("trace.request_id_header must not be empty when trace is enabled");
+        }
+
+        if self.backend.forwarded_proto_header.trim().is_empty() {
+            bail!("backend.forwarded_proto_header must not be empty");
         }
 
         if self.internal_endpoints.enabled
@@ -140,6 +145,8 @@ pub struct ClusterConfig {
     pub sni: String,
     #[serde(default)]
     pub use_tls: bool,
+    #[serde(default)]
+    pub preserve_original_host: bool,
     pub peers: Vec<String>,
 }
 
@@ -162,8 +169,50 @@ impl ClusterConfig {
 pub struct SinkholeConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub mode: SinkholeMode,
+    #[serde(default = "default_sinkhole_status")]
+    pub local_status: u16,
+    #[serde(default = "default_sinkhole_body")]
+    pub local_body: String,
+    #[serde(default = "default_sinkhole_content_type")]
+    pub local_content_type: String,
+    #[serde(default)]
+    pub local_headers: HashMap<String, String>,
+    #[serde(default)]
+    pub delay_ms: u64,
+    #[serde(default)]
+    pub jitter_ms: u64,
     #[serde(flatten)]
     pub cluster: Option<ClusterConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SinkholeMode {
+    Proxy,
+    #[default]
+    Local,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BlackholeConfig {
+    #[serde(default = "default_blackhole_delay_ms")]
+    pub delay_ms: u64,
+    #[serde(default)]
+    pub jitter_ms: u64,
+    #[serde(default = "default_true")]
+    pub log: bool,
+}
+
+impl Default for BlackholeConfig {
+    fn default() -> Self {
+        Self {
+            delay_ms: default_blackhole_delay_ms(),
+            jitter_ms: 0,
+            log: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -186,8 +235,12 @@ pub struct FilterConfig {
     pub allow_hosts: Vec<String>,
     #[serde(default)]
     pub block_hosts: Vec<String>,
+    #[serde(default)]
+    pub allow_path_prefixes: Vec<String>,
     #[serde(default = "default_true")]
     pub require_host_header: bool,
+    #[serde(default)]
+    pub require_user_agent: bool,
     #[serde(default = "default_allowed_methods")]
     pub allow_methods: Vec<String>,
     #[serde(default)]
@@ -196,8 +249,14 @@ pub struct FilterConfig {
     pub block_header_names: Vec<String>,
     #[serde(default = "default_block_path_patterns")]
     pub block_path_patterns: Vec<String>,
+    #[serde(default = "default_block_path_suffixes")]
+    pub block_path_suffixes: Vec<String>,
+    #[serde(default = "default_block_file_extensions")]
+    pub block_file_extensions: Vec<String>,
     #[serde(default = "default_block_query_patterns")]
     pub block_query_patterns: Vec<String>,
+    #[serde(default = "default_block_query_keys")]
+    pub block_query_keys: Vec<String>,
     #[serde(default)]
     pub trusted_user_agents: Vec<String>,
     #[serde(default)]
@@ -270,6 +329,12 @@ pub struct FilterConfig {
     pub blocked_ua_score: u32,
     #[serde(default)]
     pub repeated_path_score: u32,
+    #[serde(default = "default_suspicious_header_score")]
+    pub suspicious_header_score: u32,
+    #[serde(default = "default_suspicious_query_key_score")]
+    pub suspicious_query_key_score: u32,
+    #[serde(default = "default_sensitive_extension_score")]
+    pub sensitive_extension_score: u32,
     #[serde(default = "default_reject_status")]
     pub reject_status: u16,
     #[serde(default = "default_reject_body")]
@@ -282,6 +347,8 @@ pub struct RouteConfig {
     pub host_equals: Option<String>,
     pub host_suffix: Option<String>,
     pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub rewrite_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -318,7 +385,7 @@ pub struct AdaptiveDefenseConfig {
     pub ban_action: TrafficAction,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct BackendConfig {
     #[serde(default)]
     pub inject_headers: HashMap<String, String>,
@@ -326,6 +393,25 @@ pub struct BackendConfig {
     pub strip_inbound_internal_headers: Vec<String>,
     #[serde(default = "default_true")]
     pub set_forwarded_port: bool,
+    #[serde(default = "default_forwarded_proto_header")]
+    pub forwarded_proto_header: String,
+    #[serde(default = "default_true")]
+    pub preserve_trusted_proto_header: bool,
+    #[serde(default = "default_true")]
+    pub set_forwarded_header: bool,
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            inject_headers: HashMap::new(),
+            strip_inbound_internal_headers: default_strip_inbound_internal_headers(),
+            set_forwarded_port: true,
+            forwarded_proto_header: default_forwarded_proto_header(),
+            preserve_trusted_proto_header: true,
+            set_forwarded_header: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -334,7 +420,7 @@ pub struct TraceConfig {
     pub enabled: bool,
     #[serde(default = "default_request_id_header")]
     pub request_id_header: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub trust_incoming_request_id: bool,
     #[serde(default = "default_true")]
     pub inject_correlation_header: bool,
@@ -345,7 +431,7 @@ impl Default for TraceConfig {
         Self {
             enabled: true,
             request_id_header: default_request_id_header(),
-            trust_incoming_request_id: true,
+            trust_incoming_request_id: false,
             inject_correlation_header: true,
         }
     }
@@ -454,6 +540,26 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
+fn default_sinkhole_status() -> u16 {
+    200
+}
+
+fn default_sinkhole_body() -> String {
+    "<html><body><h1>ok</h1></body></html>".to_string()
+}
+
+fn default_sinkhole_content_type() -> String {
+    "text/html; charset=utf-8".to_string()
+}
+
+fn default_blackhole_delay_ms() -> u64 {
+    1500
+}
+
 fn default_health_frequency() -> u64 {
     5
 }
@@ -526,6 +632,18 @@ fn default_suspicious_method_override_score() -> u32 {
     2
 }
 
+fn default_suspicious_header_score() -> u32 {
+    2
+}
+
+fn default_suspicious_query_key_score() -> u32 {
+    2
+}
+
+fn default_sensitive_extension_score() -> u32 {
+    3
+}
+
 fn default_requests_per_period() -> u32 {
     120
 }
@@ -555,7 +673,10 @@ fn default_security_headers() -> HashMap<String, String> {
         ("X-Content-Type-Options", "nosniff"),
         ("X-Frame-Options", "DENY"),
         ("Referrer-Policy", "same-origin"),
-        ("Permissions-Policy", "geolocation=(), microphone=(), camera=()"),
+        (
+            "Permissions-Policy",
+            "geolocation=(), microphone=(), camera=()",
+        ),
     ]
     .into_iter()
     .map(|(name, value)| (name.to_string(), value.to_string()))
@@ -649,6 +770,54 @@ fn default_block_query_patterns() -> Vec<String> {
     .collect()
 }
 
+fn default_block_path_suffixes() -> Vec<String> {
+    [
+        "/.env",
+        "/.git/config",
+        "/id_rsa",
+        "/docker-compose.yml",
+        "/docker-compose.yaml",
+        "/docker-compose.override.yml",
+        "/docker-compose.override.yaml",
+        "/dump.sql",
+        "/backup.sql",
+        "/config.php.bak",
+        "/web.config.bak",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn default_block_file_extensions() -> Vec<String> {
+    [
+        ".bak", ".backup", ".cfg", ".conf", ".crt", ".env", ".example", ".ini", ".key", ".log",
+        ".old", ".pem", ".sql", ".swp", ".tar", ".tar.gz", ".tgz", ".yaml~", ".yml~", ".zip",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn default_block_query_keys() -> Vec<String> {
+    [
+        "aws_access_key_id",
+        "aws_secret_access_key",
+        "cmd",
+        "command",
+        "debug",
+        "dump",
+        "exec",
+        "password",
+        "phpinfo",
+        "shell",
+        "token",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 fn default_client_ip_headers() -> Vec<String> {
     [
         "CF-Connecting-IPv6",
@@ -680,6 +849,10 @@ fn default_strip_inbound_internal_headers() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+fn default_forwarded_proto_header() -> String {
+    "X-Forwarded-Proto".to_string()
 }
 
 fn default_max_concurrent_per_ip() -> usize {

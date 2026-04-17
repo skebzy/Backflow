@@ -34,7 +34,9 @@ pub fn run() -> Result<()> {
         pools.insert(name.clone(), runtime.load_balancer);
     }
 
-    let sinkhole = if app_config.sinkhole.enabled {
+    let sinkhole = if app_config.sinkhole.enabled
+        && matches!(app_config.sinkhole.mode, crate::config::SinkholeMode::Proxy)
+    {
         Some(build_cluster(
             app_config
                 .sinkhole
@@ -53,7 +55,9 @@ pub fn run() -> Result<()> {
             &app_config,
             pools,
             pool_configs,
-            sinkhole.as_ref().map(|runtime| runtime.load_balancer.clone()),
+            sinkhole
+                .as_ref()
+                .map(|runtime| runtime.load_balancer.clone()),
             router,
         ),
     );
@@ -61,8 +65,8 @@ pub fn run() -> Result<()> {
     for listener in &app_config.server.listeners {
         match &listener.tls {
             Some(tls) => {
-                let mut tls_settings =
-                    TlsSettings::intermediate(&tls.cert_path, &tls.key_path).with_context(|| {
+                let mut tls_settings = TlsSettings::intermediate(&tls.cert_path, &tls.key_path)
+                    .with_context(|| {
                         format!(
                             "failed to load listener TLS assets cert={} key={}",
                             tls.cert_path, tls.key_path

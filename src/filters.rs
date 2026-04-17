@@ -1,9 +1,4 @@
-use std::{
-    collections::HashSet,
-    net::IpAddr,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{collections::HashSet, net::IpAddr, str::FromStr, sync::Arc};
 
 use ipnet::IpNet;
 use log::warn;
@@ -19,11 +14,15 @@ pub struct FilterEngine {
     block_ips: Vec<IpNet>,
     allow_hosts: HashSet<String>,
     block_hosts: HashSet<String>,
+    allow_path_prefixes: Vec<String>,
     allow_methods: HashSet<String>,
     block_user_agents: Vec<String>,
     block_header_names: HashSet<String>,
     block_path_patterns: Vec<String>,
+    block_path_suffixes: Vec<String>,
+    block_file_extensions: Vec<String>,
     block_query_patterns: Vec<String>,
+    block_query_keys: HashSet<String>,
     trusted_user_agents: Vec<String>,
     skip_rate_limit_paths: Vec<String>,
     config: crate::config::FilterConfig,
@@ -50,6 +49,7 @@ impl FilterEngine {
             block_ips,
             allow_hosts: normalize_set(&config.filters.allow_hosts),
             block_hosts: normalize_set(&config.filters.block_hosts),
+            allow_path_prefixes: config.filters.allow_path_prefixes.clone(),
             allow_methods: config
                 .filters
                 .allow_methods
@@ -74,9 +74,27 @@ impl FilterEngine {
                 .iter()
                 .map(|value| value.to_ascii_lowercase())
                 .collect(),
+            block_path_suffixes: config
+                .filters
+                .block_path_suffixes
+                .iter()
+                .map(|value| value.to_ascii_lowercase())
+                .collect(),
+            block_file_extensions: config
+                .filters
+                .block_file_extensions
+                .iter()
+                .map(|value| value.to_ascii_lowercase())
+                .collect(),
             block_query_patterns: config
                 .filters
                 .block_query_patterns
+                .iter()
+                .map(|value| value.to_ascii_lowercase())
+                .collect(),
+            block_query_keys: config
+                .filters
+                .block_query_keys
                 .iter()
                 .map(|value| value.to_ascii_lowercase())
                 .collect(),
@@ -94,11 +112,19 @@ impl FilterEngine {
     }
 
     pub fn evaluate(&self, request: &RequestMeta) -> Decision {
-        if self.allow_ips.iter().any(|rule| rule.contains(&request.client_ip)) {
+        if self
+            .allow_ips
+            .iter()
+            .any(|rule| rule.contains(&request.client_ip))
+        {
             return Decision::allow();
         }
 
-        if self.block_ips.iter().any(|rule| rule.contains(&request.client_ip)) {
+        if self
+            .block_ips
+            .iter()
+            .any(|rule| rule.contains(&request.client_ip))
+        {
             return self.map_action(
                 self.config.default_action,
                 self.config.reject_status,
@@ -134,7 +160,33 @@ impl FilterEngine {
             );
         }
 
-        if !self.allow_methods.contains(&request.method.to_ascii_uppercase()) {
+        if !self.allow_path_prefixes.is_empty()
+            && !self
+                .allow_path_prefixes
+                .iter()
+                .any(|prefix| request.path.starts_with(prefix))
+        {
+            return self.map_action(
+                self.config.default_action,
+                self.config.reject_status,
+                self.config.reject_body.clone(),
+                format!("path {} not allowed", request.path),
+            );
+        }
+
+        if self.config.require_user_agent && request.user_agent.is_empty() {
+            return self.map_action(
+                self.config.default_action,
+                self.config.reject_status,
+                self.config.reject_body.clone(),
+                "missing user-agent header".to_string(),
+            );
+        }
+
+        if !self
+            .allow_methods
+            .contains(&request.method.to_ascii_uppercase())
+        {
             return self.map_action(
                 self.config.default_action,
                 self.config.reject_status,
@@ -161,8 +213,7 @@ impl FilterEngine {
             );
         }
 
-        if self.config.reject_conflicting_content_headers
-            && request.has_conflicting_content_headers
+        if self.config.reject_conflicting_content_headers && request.has_conflicting_content_headers
         {
             return self.map_action(
                 self.config.default_action,
@@ -268,12 +319,39 @@ impl FilterEngine {
             );
         }
 
+        if let Some(pattern) = request.blocked_path_suffix(&self.block_path_suffixes) {
+            return self.map_action(
+                self.config.default_action,
+                self.config.reject_status,
+                self.config.reject_body.clone(),
+                format!("blocked path suffix detected: {pattern}"),
+            );
+        }
+
+        if let Some(extension) = request.blocked_file_extension(&self.block_file_extensions) {
+            return self.map_action(
+                self.config.default_action,
+                self.config.reject_status,
+                self.config.reject_body.clone(),
+                format!("blocked file extension detected: {extension}"),
+            );
+        }
+
         if let Some(pattern) = request.blocked_query_pattern(&self.block_query_patterns) {
             return self.map_action(
                 self.config.default_action,
                 self.config.reject_status,
                 self.config.reject_body.clone(),
                 format!("blocked query pattern detected: {pattern}"),
+            );
+        }
+
+        if let Some(key) = request.blocked_query_key(&self.block_query_keys) {
+            return self.map_action(
+                self.config.default_action,
+                self.config.reject_status,
+                self.config.reject_body.clone(),
+                format!("blocked query key detected: {key}"),
             );
         }
 
@@ -434,10 +512,7 @@ impl FilterEngine {
             score += self.config.odd_method_score;
         }
 
-        if lower_path.contains("%00")
-            || lower_path.contains("%2f")
-            || lower_path.contains("%5c")
-        {
+        if lower_path.contains("%00") || lower_path.contains("%2f") || lower_path.contains("%5c") {
             score += self.config.encoded_path_score;
         }
 
@@ -479,6 +554,18 @@ impl FilterEngine {
 
         if request.has_suspicious_method_override() {
             score += self.config.suspicious_method_override_score;
+        }
+
+        if request.has_suspicious_headers() {
+            score += self.config.suspicious_header_score;
+        }
+
+        if request.has_sensitive_query_key(&self.block_query_keys) {
+            score += self.config.suspicious_query_key_score;
+        }
+
+        if request.has_sensitive_extension(&self.block_file_extensions) {
+            score += self.config.sensitive_extension_score;
         }
 
         if request.header_count > (self.config.max_header_count / 2) {
@@ -572,6 +659,43 @@ impl RequestMeta {
             .map(String::as_str)
     }
 
+    fn blocked_path_suffix<'a>(&'a self, blocked_suffixes: &'a [String]) -> Option<&'a str> {
+        let lower_path = self.path.to_ascii_lowercase();
+        blocked_suffixes
+            .iter()
+            .find(|suffix| lower_path.ends_with(suffix.as_str()))
+            .map(String::as_str)
+    }
+
+    fn blocked_file_extension<'a>(&'a self, blocked_extensions: &'a [String]) -> Option<&'a str> {
+        let lower_path = self.path.to_ascii_lowercase();
+        blocked_extensions
+            .iter()
+            .find(|extension| lower_path.ends_with(extension.as_str()))
+            .map(String::as_str)
+    }
+
+    fn blocked_query_key<'a>(&'a self, blocked_keys: &'a HashSet<String>) -> Option<&'a str> {
+        self.query
+            .split('&')
+            .filter_map(|segment| {
+                segment
+                    .split_once('=')
+                    .map(|(key, _)| key)
+                    .or(Some(segment))
+            })
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| decode_query_token(segment).to_ascii_lowercase())
+            .find(|key| blocked_keys.contains(key))
+            .map(|key| {
+                blocked_keys
+                    .get(key.as_str())
+                    .map(String::as_str)
+                    .unwrap_or("query-key")
+            })
+    }
+
     fn has_suspicious_method_override(&self) -> bool {
         self.header_names.iter().any(|name| {
             matches!(
@@ -582,6 +706,43 @@ impl RequestMeta {
                     | "x-original-method"
             )
         })
+    }
+
+    fn has_suspicious_headers(&self) -> bool {
+        self.header_names.iter().any(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "x-original-url"
+                    | "x-rewrite-url"
+                    | "x-http-destinationurl"
+                    | "x-http-host-override"
+                    | "x-forwarded-server"
+                    | "proxy-authorization"
+                    | "content-range"
+            )
+        })
+    }
+
+    fn has_sensitive_query_key(&self, blocked_keys: &HashSet<String>) -> bool {
+        self.query
+            .split('&')
+            .filter_map(|segment| {
+                segment
+                    .split_once('=')
+                    .map(|(key, _)| key)
+                    .or(Some(segment))
+            })
+            .map(str::trim)
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| decode_query_token(segment).to_ascii_lowercase())
+            .any(|key| blocked_keys.contains(&key))
+    }
+
+    fn has_sensitive_extension(&self, blocked_extensions: &[String]) -> bool {
+        let lower_path = self.path.to_ascii_lowercase();
+        blocked_extensions
+            .iter()
+            .any(|extension| lower_path.ends_with(extension.as_str()))
     }
 }
 
@@ -706,7 +867,10 @@ pub(crate) fn has_path_traversal(value: &str) -> bool {
 }
 
 pub(crate) fn count_path_segments(value: &str) -> usize {
-    value.split('/').filter(|segment| !segment.is_empty()).count()
+    value
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .count()
 }
 
 pub(crate) fn count_query_params(value: &str) -> usize {
@@ -714,7 +878,10 @@ pub(crate) fn count_query_params(value: &str) -> usize {
         return 0;
     }
 
-    value.split('&').filter(|segment| !segment.is_empty()).count()
+    value
+        .split('&')
+        .filter(|segment| !segment.is_empty())
+        .count()
 }
 
 fn longest_repeated_run(value: &str) -> usize {
@@ -735,10 +902,14 @@ fn longest_repeated_run(value: &str) -> usize {
     longest
 }
 
+fn decode_query_token(value: &str) -> String {
+    value.replace('+', " ")
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{net::IpAddr, str::FromStr};
     use std::collections::HashMap;
+    use std::{net::IpAddr, str::FromStr};
 
     use crate::config::{
         AppConfig, ClusterConfig, FilterConfig, HealthCheckConfig, RateLimitConfig, ServerConfig,
@@ -761,20 +932,30 @@ mod tests {
                 host_header: "origin.internal".to_string(),
                 sni: "origin.internal".to_string(),
                 use_tls: false,
+                preserve_original_host: false,
                 peers: vec!["127.0.0.1:9000".to_string()],
             },
             pools: HashMap::new(),
             routes: vec![],
             sinkhole: SinkholeConfig {
                 enabled: true,
+                mode: crate::config::SinkholeMode::Proxy,
+                local_status: 200,
+                local_body: "ok".to_string(),
+                local_content_type: "text/plain".to_string(),
+                local_headers: HashMap::new(),
+                delay_ms: 0,
+                jitter_ms: 0,
                 cluster: Some(ClusterConfig {
                     name: "sinkhole".to_string(),
                     host_header: "sinkhole.internal".to_string(),
                     sni: "sinkhole.internal".to_string(),
                     use_tls: false,
+                    preserve_original_host: false,
                     peers: vec!["127.0.0.1:9100".to_string()],
                 }),
             },
+            blackhole: crate::config::BlackholeConfig::default(),
             health_checks: HealthCheckConfig {
                 enabled: false,
                 frequency_secs: 5,
@@ -785,12 +966,17 @@ mod tests {
                 block_ips: vec!["10.0.0.1".to_string()],
                 allow_hosts: vec![],
                 block_hosts: vec![],
+                allow_path_prefixes: vec![],
                 require_host_header: true,
+                require_user_agent: false,
                 allow_methods: vec!["GET".to_string(), "POST".to_string(), "HEAD".to_string()],
                 block_user_agents: vec![],
                 block_header_names: vec!["x-evil".to_string()],
                 block_path_patterns: vec!["/.env".to_string()],
+                block_path_suffixes: vec!["/id_rsa".to_string()],
+                block_file_extensions: vec![".sql".to_string()],
                 block_query_patterns: vec!["union select".to_string()],
+                block_query_keys: vec!["token".to_string()],
                 trusted_user_agents: vec![],
                 skip_rate_limit_paths: vec![],
                 strip_connection_headers: true,
@@ -827,6 +1013,9 @@ mod tests {
                 empty_header_score: 1,
                 blocked_ua_score: 2,
                 repeated_path_score: 2,
+                suspicious_header_score: 2,
+                suspicious_query_key_score: 2,
+                sensitive_extension_score: 3,
                 reject_status: 403,
                 reject_body: "blocked".to_string(),
             },
@@ -938,6 +1127,27 @@ mod tests {
         req.query = "id=1 union select password from users".to_string();
         req.query_len = req.query.len();
         req.query_param_count = 1;
+        let decision = engine.evaluate(&req);
+        assert!(matches!(decision, Decision::Reject { .. }));
+    }
+
+    #[test]
+    fn blocked_query_key_is_rejected() {
+        let engine = FilterEngine::new(&config());
+        let mut req = request("10.0.0.8");
+        req.query = "token=secret".to_string();
+        req.query_len = req.query.len();
+        req.query_param_count = 1;
+        let decision = engine.evaluate(&req);
+        assert!(matches!(decision, Decision::Reject { .. }));
+    }
+
+    #[test]
+    fn blocked_extension_is_rejected() {
+        let engine = FilterEngine::new(&config());
+        let mut req = request("10.0.0.9");
+        req.path = "/backup.sql".to_string();
+        req.path_segment_count = 1;
         let decision = engine.evaluate(&req);
         assert!(matches!(decision, Decision::Reject { .. }));
     }

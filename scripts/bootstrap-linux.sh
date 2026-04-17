@@ -372,12 +372,20 @@ name = "origin"
 host_header = "origin.internal"
 sni = "origin.internal"
 use_tls = false
+preserve_original_host = true
 peers = [
   "127.0.0.1:9000",
 ]
 
 [sinkhole]
 enabled = false
+mode = "local"
+local_status = 200
+local_body = "<html><body><h1>ok</h1></body></html>"
+local_content_type = "text/html; charset=utf-8"
+local_headers = { "Server" = "nginx" }
+delay_ms = 250
+jitter_ms = 1000
 
 [health_checks]
 enabled = true
@@ -389,7 +397,9 @@ allow_ips = ["127.0.0.1", "::1"]
 block_ips = []
 allow_hosts = []
 block_hosts = []
+allow_path_prefixes = ["/", "/api/", "/assets/"]
 require_host_header = true
+require_user_agent = false
 allow_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 block_user_agents = ["masscan", "zgrab"]
 block_header_names = ["x-original-url", "x-rewrite-url"]
@@ -412,6 +422,14 @@ block_path_patterns = [
   "/.aws/",
   "/.ssh/",
 ]
+block_path_suffixes = [
+  "/.env",
+  "/.git/config",
+  "/id_rsa",
+  "/docker-compose.yml",
+  "/backup.sql",
+]
+block_file_extensions = [".env", ".sql", ".bak", ".pem", ".key", ".zip"]
 block_query_patterns = [
   "union select",
   "<script",
@@ -431,6 +449,7 @@ block_query_patterns = [
   "|curl ",
   "<?php",
 ]
+block_query_keys = ["token", "password", "cmd", "exec", "debug"]
 trusted_user_agents = []
 skip_rate_limit_paths = ["/healthz", "/readyz"]
 strip_connection_headers = true
@@ -467,6 +486,9 @@ query_spike_score = 2
 empty_header_score = 1
 blocked_ua_score = 3
 repeated_path_score = 2
+suspicious_header_score = 2
+suspicious_query_key_score = 2
+sensitive_extension_score = 3
 reject_status = 403
 reject_body = "blocked by backflow"
 
@@ -487,10 +509,15 @@ strike_threshold = 6
 ban_secs = 300
 ban_action = "blackhole"
 
+[blackhole]
+delay_ms = 1200
+jitter_ms = 3000
+log = true
+
 [trace]
 enabled = true
 request_id_header = "X-Request-ID"
-trust_incoming_request_id = true
+trust_incoming_request_id = false
 inject_correlation_header = true
 
 [response]
@@ -538,6 +565,9 @@ strip_inbound_internal_headers = [
   "Forwarded",
 ]
 set_forwarded_port = true
+forwarded_proto_header = "X-Forwarded-Proto"
+preserve_trusted_proto_header = true
+set_forwarded_header = true
 EOF
 
   echo "Created config/backflow.toml from detected host defaults."
@@ -709,8 +739,12 @@ Detected host profile:
 
 Next steps:
 1. Edit config/backflow.toml for your real domains, upstream peers, and trusted proxy CIDRs.
-2. Review deploy/backflow.sysctl.conf before applying it on the host.
-3. Start the proxy with:
+2. If you want a better starting point, run:
+   bash scripts/init-config.sh single-origin
+   bash scripts/init-config.sh app-and-api
+   bash scripts/init-config.sh cloudflare-origin
+3. Review deploy/backflow.sysctl.conf before applying it on the host.
+4. Start the proxy with:
    bash scripts/run-linux.sh
 
 Optional:

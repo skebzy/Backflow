@@ -11,6 +11,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 bytes = "1.7"
 env_logger = "0.11"
+http = "1"
 log = "0.4"
 ipnet = "2.10"
 pingora = { version = "0.8.0", features = ["lb"] }
@@ -19,6 +20,7 @@ pingora-http = "0.8.0"
 pingora-load-balancing = "0.8.0"
 pingora-proxy = "0.8.0"
 serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["time"] }
 toml = "0.8"
 
 [profile.release]

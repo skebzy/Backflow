@@ -13,11 +13,13 @@ use std::{
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::Uri;
 use ipnet::IpNet;
 use log::{info, warn};
 use pingora_core::{upstreams::peer::HttpPeer, Error};
 use pingora_http::ResponseHeader;
 use pingora_proxy::{ProxyHttp, Session};
+use tokio::time::sleep;
 
 use crate::{
     config::{AppConfig, ClusterConfig, ProtectedPathConfig, TrafficAction},
@@ -45,12 +47,17 @@ pub struct BackflowProxy {
     backend_headers: HashMap<String, String>,
     strip_inbound_internal_headers: Vec<String>,
     set_forwarded_port: bool,
+    forwarded_proto_header: String,
+    preserve_trusted_proto_header: bool,
+    set_forwarded_header: bool,
     trace_enabled: bool,
     request_id_header: String,
     trust_incoming_request_id: bool,
     inject_correlation_header: bool,
     response_headers: HashMap<String, String>,
     remove_response_headers: Vec<String>,
+    sinkhole: SinkholeRuntime,
+    blackhole: BlackholeRuntime,
     maintenance: MaintenanceRuntime,
     internal_endpoints: InternalEndpointsRuntime,
     protected_paths: Vec<ProtectedPathRuntime>,
@@ -89,12 +96,17 @@ impl BackflowProxy {
             backend_headers: config.backend.inject_headers.clone(),
             strip_inbound_internal_headers: config.backend.strip_inbound_internal_headers.clone(),
             set_forwarded_port: config.backend.set_forwarded_port,
+            forwarded_proto_header: config.backend.forwarded_proto_header.clone(),
+            preserve_trusted_proto_header: config.backend.preserve_trusted_proto_header,
+            set_forwarded_header: config.backend.set_forwarded_header,
             trace_enabled: config.trace.enabled,
             request_id_header: config.trace.request_id_header.clone(),
             trust_incoming_request_id: config.trace.trust_incoming_request_id,
             inject_correlation_header: config.trace.inject_correlation_header,
             response_headers: config.response.headers.clone(),
             remove_response_headers: config.response.remove_headers.clone(),
+            sinkhole: SinkholeRuntime::from_config(&config.sinkhole),
+            blackhole: BlackholeRuntime::from_config(&config.blackhole),
             maintenance: MaintenanceRuntime::from_config(&config.maintenance),
             internal_endpoints: InternalEndpointsRuntime::from_config(&config.internal_endpoints),
             protected_paths: config
@@ -106,9 +118,7 @@ impl BackflowProxy {
     }
 
     fn request_meta(session: &Session) -> Result<RequestMeta> {
-        let peer_ip = session
-            .client_addr()
-            .and_then(|addr| addr.as_inet().map(|addr| addr.ip()))
+        let peer_ip = Self::session_peer_ip(session)
             .ok_or_else(|| anyhow!("failed to read client address from session"))?;
         let req = session.req_header();
         let path = req.uri.path().to_string();
@@ -182,7 +192,7 @@ impl BackflowProxy {
         let has_valid_host = !normalized_host.is_empty()
             && normalized_host
                 .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':' ));
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':'));
         let has_valid_path = path.starts_with('/');
         let has_malformed_encoding = crate::filters::has_malformed_percent_encoding(&path)
             || crate::filters::has_malformed_percent_encoding(&query);
@@ -225,14 +235,17 @@ impl BackflowProxy {
         decision: &Decision,
     ) -> Result<(&'a ClusterConfig, &'a SharedLoadBalancer)> {
         if decision.is_sinkhole() {
-            let cluster = self
-                .sinkhole_cluster
-                .as_ref()
-                .ok_or_else(|| anyhow!("sinkhole decision reached but sinkhole cluster is missing"))?;
-            let lb = self
-                .sinkhole_lb
-                .as_ref()
-                .ok_or_else(|| anyhow!("sinkhole decision reached but sinkhole load balancer is missing"))?;
+            if !self.sinkhole_uses_upstream() {
+                return Err(anyhow!(
+                    "sinkhole decision reached but sinkhole mode is local, not proxy"
+                ));
+            }
+            let cluster = self.sinkhole_cluster.as_ref().ok_or_else(|| {
+                anyhow!("sinkhole decision reached but sinkhole cluster is missing")
+            })?;
+            let lb = self.sinkhole_lb.as_ref().ok_or_else(|| {
+                anyhow!("sinkhole decision reached but sinkhole load balancer is missing")
+            })?;
             return Ok((cluster, lb));
         }
 
@@ -248,7 +261,11 @@ impl BackflowProxy {
     }
 
     fn to_pingora_error(error: anyhow::Error) -> Box<Error> {
-        Error::because(pingora_core::ErrorType::InternalError, "backflow error", error)
+        Error::because(
+            pingora_core::ErrorType::InternalError,
+            "backflow error",
+            error,
+        )
     }
 
     fn extract_client_ip(&self, session: &Session, request: &RequestMeta) -> IpAddr {
@@ -284,6 +301,12 @@ impl BackflowProxy {
         request.client_ip
     }
 
+    fn session_peer_ip(session: &Session) -> Option<IpAddr> {
+        session
+            .client_addr()
+            .and_then(|addr| addr.as_inet().map(|addr| addr.ip()))
+    }
+
     fn selected_cluster_for<'a>(
         &'a self,
         ctx: &RequestContext,
@@ -305,10 +328,14 @@ impl BackflowProxy {
         }
 
         if self.trust_incoming_request_id {
-            if let Some(value) = session.req_header().headers.get(self.request_id_header.as_str()) {
+            if let Some(value) = session
+                .req_header()
+                .headers
+                .get(self.request_id_header.as_str())
+            {
                 if let Ok(value) = value.to_str() {
                     let value = value.trim();
-                    if !value.is_empty() {
+                    if is_valid_request_id(value) {
                         return Some(value.to_string());
                     }
                 }
@@ -339,6 +366,118 @@ impl BackflowProxy {
             .get(&self.default_pool)
             .and_then(|pool| pool.select(b"readyz", 256))
             .is_some()
+    }
+
+    fn forwarded_proto(&self, session: &Session) -> &'static str {
+        let peer_ip = Self::session_peer_ip(session);
+        let trusted_peer = peer_ip
+            .map(|ip| {
+                self.trusted_proxies
+                    .iter()
+                    .any(|network| network.contains(&ip))
+            })
+            .unwrap_or(false);
+
+        if self.preserve_trusted_proto_header && trusted_peer {
+            if let Some(value) = session
+                .req_header()
+                .headers
+                .get(self.forwarded_proto_header.as_str())
+                .and_then(|value| value.to_str().ok())
+            {
+                let normalized = value.trim().to_ascii_lowercase();
+                if normalized == "https" {
+                    return "https";
+                }
+            }
+        }
+
+        "http"
+    }
+
+    fn request_summary(&self, session: &Session, ctx: &RequestContext) -> String {
+        let method = session.req_header().method.as_str();
+        let path = if ctx.upstream_path.is_empty() {
+            session.req_header().uri.path().to_string()
+        } else {
+            ctx.upstream_path.clone()
+        };
+        let host = if ctx.host.is_empty() {
+            session
+                .req_header()
+                .headers
+                .get("Host")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("-")
+                .to_string()
+        } else {
+            ctx.host.clone()
+        };
+        let client = ctx
+            .client_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        format!("{client} {method} {host}{path}")
+    }
+
+    fn is_protocol_upgrade(request: &pingora_http::RequestHeader) -> bool {
+        let has_upgrade = request.headers.get("Upgrade").is_some();
+        let connection_upgrade = request
+            .headers
+            .get("Connection")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| {
+                value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+            })
+            .unwrap_or(false);
+
+        has_upgrade || connection_upgrade
+    }
+
+    fn forwarded_header_value(
+        &self,
+        ctx: &RequestContext,
+        forwarded_proto: &str,
+    ) -> Option<String> {
+        let client_ip = ctx.client_ip?;
+        let client = match client_ip {
+            IpAddr::V4(ip) => ip.to_string(),
+            IpAddr::V6(ip) => format!("\"[{ip}]\""),
+        };
+        let host = if ctx.host.is_empty() {
+            String::new()
+        } else {
+            format!(";host=\"{}\"", ctx.host)
+        };
+
+        Some(format!("for={client};proto={forwarded_proto}{host}"))
+    }
+
+    fn sinkhole_uses_upstream(&self) -> bool {
+        self.sinkhole.enabled && matches!(self.sinkhole.mode, crate::config::SinkholeMode::Proxy)
+    }
+
+    fn tarpit_duration(
+        &self,
+        base_ms: u64,
+        jitter_ms: u64,
+        ctx: &RequestContext,
+        salt: &str,
+    ) -> Duration {
+        let mut total = base_ms;
+        if jitter_ms > 0 {
+            let mut hasher = DefaultHasher::new();
+            salt.hash(&mut hasher);
+            ctx.client_ip.hash(&mut hasher);
+            ctx.request_id.hash(&mut hasher);
+            ctx.path.hash(&mut hasher);
+            total += hasher.finish() % (jitter_ms + 1);
+        }
+
+        Duration::from_millis(total)
     }
 
     async fn maybe_handle_internal_endpoint(
@@ -442,6 +581,8 @@ pub struct RequestContext {
     pub client_ip: Option<IpAddr>,
     pub host: String,
     pub path: String,
+    pub upstream_path: String,
+    pub matched_path_prefix: Option<String>,
     pub decision: Decision,
     pub counted_concurrency: bool,
     pub selected_pool: String,
@@ -457,6 +598,8 @@ impl ProxyHttp for BackflowProxy {
             client_ip: None,
             host: String::new(),
             path: String::new(),
+            upstream_path: String::new(),
+            matched_path_prefix: None,
             decision: Decision::allow(),
             counted_concurrency: false,
             selected_pool: String::new(),
@@ -476,7 +619,10 @@ impl ProxyHttp for BackflowProxy {
         ctx.client_ip = Some(client_ip);
         ctx.host = request.host.clone();
         ctx.path = request.path.clone();
-        ctx.selected_pool = self.router.select_pool(&request.host, &request.path).to_string();
+        let route = self.router.select(&request.host, &request.path);
+        ctx.selected_pool = route.target_pool.to_string();
+        ctx.upstream_path = route.upstream_path;
+        ctx.matched_path_prefix = route.matched_path_prefix.map(str::to_string);
         ctx.request_id = self.current_request_id(session);
 
         if self
@@ -493,8 +639,13 @@ impl ProxyHttp for BackflowProxy {
 
         if let Some(decision) = self.protected_path_decision(&request) {
             ctx.decision = decision;
-            if matches!(ctx.decision, Decision::Reject { .. } | Decision::Blackhole { .. }) {
-                let _ = self.state.record_infraction(request.client_ip, ctx.decision.reason());
+            if matches!(
+                ctx.decision,
+                Decision::Reject { .. } | Decision::Blackhole { .. }
+            ) {
+                let _ = self
+                    .state
+                    .record_infraction(request.client_ip, ctx.decision.reason());
             }
             return self.handle_decision(session, ctx, &request).await;
         }
@@ -518,14 +669,25 @@ impl ProxyHttp for BackflowProxy {
             }
         }
 
-        if matches!(ctx.decision, Decision::Reject { .. } | Decision::Sinkhole { .. } | Decision::Blackhole { .. }) {
+        if matches!(
+            ctx.decision,
+            Decision::Reject { .. } | Decision::Sinkhole { .. } | Decision::Blackhole { .. }
+        ) {
             return self.handle_decision(session, ctx, &request).await;
         }
 
         ctx.decision = self.engine.evaluate(&request);
-        if matches!(ctx.decision, Decision::Reject { .. } | Decision::Sinkhole { .. } | Decision::Blackhole { .. }) {
-            if matches!(ctx.decision, Decision::Reject { .. } | Decision::Blackhole { .. }) {
-                let _ = self.state.record_infraction(request.client_ip, ctx.decision.reason());
+        if matches!(
+            ctx.decision,
+            Decision::Reject { .. } | Decision::Sinkhole { .. } | Decision::Blackhole { .. }
+        ) {
+            if matches!(
+                ctx.decision,
+                Decision::Reject { .. } | Decision::Blackhole { .. }
+            ) {
+                let _ = self
+                    .state
+                    .record_infraction(request.client_ip, ctx.decision.reason());
             }
             return self.handle_decision(session, ctx, &request).await;
         }
@@ -539,8 +701,10 @@ impl ProxyHttp for BackflowProxy {
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<Box<HttpPeer>> {
         let (cluster_name, cluster, load_balancer) = if ctx.decision.is_sinkhole() {
-            let (cluster, lb) = self.cluster_for(&ctx.decision).map_err(Self::to_pingora_error)?;
-            ("sinkhole", cluster, lb)
+            let (cluster, lb) = self
+                .cluster_for(&ctx.decision)
+                .map_err(Self::to_pingora_error)?;
+            (self.sinkhole.log_label.as_str(), cluster, lb)
         } else {
             let (cluster, lb) = self
                 .selected_cluster_for(ctx)
@@ -552,7 +716,10 @@ impl ProxyHttp for BackflowProxy {
             .map(|ip| ip.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         let upstream = load_balancer.select(key.as_bytes(), 256).ok_or_else(|| {
-            Self::to_pingora_error(anyhow!("no upstreams available in cluster {}", cluster.name))
+            Self::to_pingora_error(anyhow!(
+                "no upstreams available in cluster {}",
+                cluster.name
+            ))
         })?;
 
         info!(
@@ -576,11 +743,13 @@ impl ProxyHttp for BackflowProxy {
         ctx: &mut Self::CTX,
     ) -> pingora_core::Result<()> {
         let (cluster, _) = if ctx.decision.is_sinkhole() {
-            self.cluster_for(&ctx.decision).map_err(Self::to_pingora_error)?
+            self.cluster_for(&ctx.decision)
+                .map_err(Self::to_pingora_error)?
         } else {
             self.selected_cluster_for(ctx)
                 .map_err(Self::to_pingora_error)?
         };
+        let is_upgrade = Self::is_protocol_upgrade(upstream_request);
         if self.engine.strip_connection_headers() {
             let connection_tokens = upstream_request
                 .headers
@@ -596,13 +765,11 @@ impl ProxyHttp for BackflowProxy {
                 })
                 .unwrap_or_default();
             for header in [
-                "Connection",
                 "Keep-Alive",
                 "Proxy-Connection",
                 "TE",
                 "Trailer",
                 "Transfer-Encoding",
-                "Upgrade",
                 "X-Forwarded-For",
                 "X-Forwarded-Proto",
                 "X-Forwarded-Host",
@@ -615,22 +782,63 @@ impl ProxyHttp for BackflowProxy {
             ] {
                 upstream_request.remove_header(header);
             }
+            if !is_upgrade {
+                upstream_request.remove_header("Connection");
+                upstream_request.remove_header("Upgrade");
+            }
             for listed in connection_tokens {
+                if is_upgrade && listed.eq_ignore_ascii_case("upgrade") {
+                    continue;
+                }
                 upstream_request.remove_header(listed.as_str());
             }
         }
         for header in &self.strip_inbound_internal_headers {
             upstream_request.remove_header(header.as_str());
         }
-        upstream_request.insert_header("Host", cluster.host_header.as_str())?;
+        let host_header = if cluster.preserve_original_host && !ctx.host.is_empty() {
+            ctx.host.as_str()
+        } else {
+            cluster.host_header.as_str()
+        };
+        upstream_request.insert_header("Host", host_header)?;
+        if !ctx.upstream_path.is_empty() && ctx.upstream_path != ctx.path {
+            let query = upstream_request.uri.query().unwrap_or_default();
+            let path_and_query = if query.is_empty() {
+                ctx.upstream_path.clone()
+            } else {
+                format!("{}?{query}", ctx.upstream_path)
+            };
+            let rewritten_uri = Uri::builder()
+                .path_and_query(path_and_query.as_str())
+                .build()
+                .map_err(|error| {
+                    Self::to_pingora_error(anyhow!("invalid rewritten uri: {error}"))
+                })?;
+            upstream_request.set_uri(rewritten_uri);
+        }
         if let Some(client_ip) = ctx.client_ip {
             upstream_request.insert_header("X-Backflow-Client-IP", client_ip.to_string())?;
             upstream_request.insert_header("X-Forwarded-For", client_ip.to_string())?;
         }
+        let forwarded_proto = self.forwarded_proto(_session);
         upstream_request.insert_header("X-Forwarded-Host", ctx.host.as_str())?;
-        upstream_request.insert_header("X-Forwarded-Proto", "http")?;
+        upstream_request.insert_header("X-Forwarded-Proto", forwarded_proto)?;
         if self.set_forwarded_port {
-            upstream_request.insert_header("X-Forwarded-Port", "80")?;
+            let port = if forwarded_proto == "https" {
+                "443"
+            } else {
+                "80"
+            };
+            upstream_request.insert_header("X-Forwarded-Port", port)?;
+        }
+        if let Some(prefix) = &ctx.matched_path_prefix {
+            upstream_request.insert_header("X-Forwarded-Prefix", prefix.as_str())?;
+        }
+        if self.set_forwarded_header {
+            if let Some(value) = self.forwarded_header_value(ctx, forwarded_proto) {
+                upstream_request.insert_header("Forwarded", value)?;
+            }
         }
         upstream_request.insert_header("X-Backflow-Decision", ctx.decision.label())?;
         upstream_request.insert_header("X-Backflow-Pool", ctx.selected_pool.as_str())?;
@@ -659,7 +867,8 @@ impl ProxyHttp for BackflowProxy {
         upstream_response.insert_header("X-Backflow-Decision", ctx.decision.label())?;
         upstream_response.insert_header("X-Backflow-Reason", ctx.decision.reason())?;
         if let Some(request_id) = &ctx.request_id {
-            upstream_response.insert_header(self.request_id_header.as_str(), request_id.as_str())?;
+            upstream_response
+                .insert_header(self.request_id_header.as_str(), request_id.as_str())?;
         }
         for (header, value) in &self.response_headers {
             upstream_response.insert_header(header.as_str(), value.as_str())?;
@@ -713,8 +922,52 @@ impl BackflowProxy {
         request: &RequestMeta,
     ) -> pingora_core::Result<bool> {
         match &ctx.decision {
-            Decision::Allow | Decision::Sinkhole { .. } => Ok(false),
-            Decision::Reject { status, body, reason } => {
+            Decision::Allow => Ok(false),
+            Decision::Sinkhole { reason } => {
+                if self.sinkhole_uses_upstream() {
+                    return Ok(false);
+                }
+
+                let tarpit = self.tarpit_duration(
+                    self.sinkhole.delay_ms,
+                    self.sinkhole.jitter_ms,
+                    ctx,
+                    "sinkhole",
+                );
+                if !tarpit.is_zero() {
+                    sleep(tarpit).await;
+                }
+
+                warn!(
+                    "sinkholing request from {} host={} reason={} mode=local",
+                    request.client_ip, request.host, reason
+                );
+                let mut response =
+                    ResponseHeader::build(self.sinkhole.status, None).map_err(|error| {
+                        Self::to_pingora_error(anyhow!("sinkhole response build failed: {error}"))
+                    })?;
+                response.insert_header("Content-Type", self.sinkhole.content_type.as_str())?;
+                response.insert_header("Cache-Control", "no-store, no-cache, must-revalidate")?;
+                response.insert_header("Pragma", "no-cache")?;
+                response.insert_header("X-Backflow-Decision", ctx.decision.label())?;
+                response.insert_header("X-Backflow-Reason", ctx.decision.reason())?;
+                for (header, value) in &self.sinkhole.headers {
+                    response.insert_header(header.as_str(), value.as_str())?;
+                }
+                if let Some(request_id) = &ctx.request_id {
+                    response.insert_header(self.request_id_header.as_str(), request_id.as_str())?;
+                }
+                session.write_response_header(Box::new(response)).await?;
+                session
+                    .write_response_body(Bytes::from(self.sinkhole.body.clone()), true)
+                    .await?;
+                Ok(true)
+            }
+            Decision::Reject {
+                status,
+                body,
+                reason,
+            } => {
                 warn!(
                     "rejecting request from {} host={} reason={}",
                     request.client_ip, request.host, reason
@@ -725,15 +978,37 @@ impl BackflowProxy {
                 Ok(true)
             }
             Decision::Blackhole { reason } => {
-                warn!(
-                    "blackholing request from {} host={} reason={}",
-                    request.client_ip, request.host, reason
+                let tarpit = self.tarpit_duration(
+                    self.blackhole.delay_ms,
+                    self.blackhole.jitter_ms,
+                    ctx,
+                    "blackhole",
                 );
+                if self.blackhole.log {
+                    warn!(
+                        "blackholing request from {} host={} reason={} delay_ms={}",
+                        request.client_ip,
+                        request.host,
+                        reason,
+                        tarpit.as_millis()
+                    );
+                }
+                if !tarpit.is_zero() {
+                    sleep(tarpit).await;
+                }
                 session.shutdown().await;
                 Ok(true)
             }
         }
     }
+}
+
+fn is_valid_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '/'))
 }
 
 struct MaintenanceRuntime {
@@ -752,6 +1027,53 @@ impl MaintenanceRuntime {
             body: config.body.clone(),
             allow_ips: crate::filters::parse_ip_rules(&config.allow_ips),
             allow_path_prefixes: config.allow_path_prefixes.clone(),
+        }
+    }
+}
+
+struct SinkholeRuntime {
+    enabled: bool,
+    mode: crate::config::SinkholeMode,
+    status: u16,
+    body: String,
+    content_type: String,
+    headers: HashMap<String, String>,
+    delay_ms: u64,
+    jitter_ms: u64,
+    log_label: String,
+}
+
+impl SinkholeRuntime {
+    fn from_config(config: &crate::config::SinkholeConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            mode: config.mode.clone(),
+            status: config.local_status,
+            body: config.local_body.clone(),
+            content_type: config.local_content_type.clone(),
+            headers: config.local_headers.clone(),
+            delay_ms: config.delay_ms,
+            jitter_ms: config.jitter_ms,
+            log_label: match config.mode {
+                crate::config::SinkholeMode::Proxy => "sinkhole-proxy".to_string(),
+                crate::config::SinkholeMode::Local => "sinkhole-local".to_string(),
+            },
+        }
+    }
+}
+
+struct BlackholeRuntime {
+    delay_ms: u64,
+    jitter_ms: u64,
+    log: bool,
+}
+
+impl BlackholeRuntime {
+    fn from_config(config: &crate::config::BlackholeConfig) -> Self {
+        Self {
+            delay_ms: config.delay_ms,
+            jitter_ms: config.jitter_ms,
+            log: config.log,
         }
     }
 }

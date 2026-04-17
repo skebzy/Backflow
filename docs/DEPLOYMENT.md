@@ -47,12 +47,15 @@ The bootstrap also installs the native build toolchain, including `cmake`, `pkg-
 
 1. Install Rust with `rustup`, then build in release mode.
 2. Start from `config/profiles/single-origin.toml`, `config/profiles/app-and-api.toml`, or `config/backflow.example.toml`.
+   For quicker setup, use `bash scripts/init-config.sh <profile>`.
+   Good profile picks are `single-origin`, `app-and-api`, and `cloudflare-origin`.
 3. Restrict `allow_hosts` to the exact domains you serve.
-4. Point `primary.peers` at your real origin addresses.
-5. Either disable sinkhole mode or point `sinkhole.peers` at a cheap internal responder.
-6. Run with `RUST_LOG=info` at first, then reduce verbosity if logs become noisy.
-7. Use `bash scripts/smoke-test.sh` once the proxy is up so you verify both normal traffic and blocked probes.
-8. Lock down `[[protected_paths]]` for admin or internal-only routes before exposing the host.
+4. Restrict `allow_path_prefixes` if your app only exposes a narrow surface such as `/`, `/api/`, and `/assets/`.
+5. Point `primary.peers` at your real origin addresses.
+6. Either disable sinkhole mode or point `sinkhole.peers` at a cheap internal responder.
+7. Run with `RUST_LOG=info` at first, then reduce verbosity if logs become noisy.
+8. Use `bash scripts/smoke-test.sh` once the proxy is up so you verify both normal traffic and blocked probes.
+9. Lock down `[[protected_paths]]` for admin or internal-only routes before exposing the host.
 
 ## System-level hardening that still matters
 

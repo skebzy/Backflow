@@ -45,7 +45,9 @@ impl RateLimiter {
     }
 
     fn lock_state(&self) -> MutexGuard<'_, HashMap<IpAddr, TokenBucket>> {
-        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 

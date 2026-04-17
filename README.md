@@ -11,6 +11,9 @@ It is built on [Cloudflare Pingora](https://github.com/cloudflare/pingora), but 
 - exposes built-in health and readiness endpoints
 - propagates request IDs for tracing across the edge and origin
 - supports maintenance windows and IP-protected path prefixes
+- ships ready-to-copy profiles for single-origin, app+API, and Cloudflare-origin setups
+- gives operators more path/query/file-extension filtering without needing a giant rule engine
+- supports path-prefix rewrites, public-host preservation, WebSocket/protocol upgrades, and standard forwarding headers
 
 This is a Linux-first project. Windows is fine for editing and experimenting, but if you are putting this on the internet, assume Linux is the real target.
 
@@ -40,9 +43,10 @@ Nginx is still the default answer for a reason. It is mature, fast, and everywhe
 
 Backflow is better when you want:
 
-- a codebase built around request filtering as a first-class concern instead of a pile of location blocks
-- clearer control over suspicious-request scoring, sinkholing, and adaptive bans
-- a smaller project surface dedicated to "protect the origin and route traffic"
+- a smaller hostile-edge proxy where abusive-request filtering is the main job instead of an add-on
+- clearer control over suspicious-request scoring, sinkholing, adaptive bans, and path-level protection
+- fast request rejection before junk traffic burns more origin CPU, app worker time, or noisy logs
+- more predictable forwarding behavior for private apps where you care about exactly what reaches the origin
 
 Nginx is better when you want:
 
@@ -54,7 +58,11 @@ Nginx is better when you want:
 
 Caddy is easier when TLS automation and quick setup matter most.
 
-Backflow is better when you want a more opinionated hostile-edge proxy with stricter request validation and custom abuse logic.
+Backflow is better when you want a stricter and more defensive edge:
+
+- stronger built-in request sanity checks, suspicious-pattern blocking, and abuse controls
+- tighter origin shielding for self-hosted apps, APIs, admin panels, and private dashboards
+- an edge that stays focused on fast filtering and explicit policy instead of trying to be an all-in-one web platform
 
 ### Backflow vs Traefik or Envoy
 
@@ -65,7 +73,9 @@ Backflow is better when you want a smaller box:
 - static config
 - predictable routing
 - focused filtering
+- lower operational drag
 - no control-plane story to babysit
+- a proxy that is easy to reason about when the main question is "how fast can we drop bad traffic and protect the origin?"
 
 ## Real Use Cases
 
@@ -93,6 +103,13 @@ Start with: `config/profiles/app-and-api.toml`
 
 The example config shows the trust and header model. The filtering model is explained in `docs/FILTERING.md`.
 
+### 4. Put the origin behind Cloudflare without trusting the internet
+
+- start from `config/profiles/cloudflare-origin.toml`
+- trust only Cloudflare source CIDRs
+- preserve `X-Forwarded-Proto` only from trusted proxies
+- keep direct-to-origin traffic from spoofing client IP or HTTPS state
+
 ## Quick Start
 
 On Linux:
@@ -112,7 +129,14 @@ bash scripts/bootstrap-linux.sh
 Then copy a profile or the example config:
 
 ```bash
-cp config/profiles/single-origin.toml config/backflow.toml
+bash scripts/init-config.sh single-origin
+```
+
+Other useful starting points:
+
+```bash
+bash scripts/init-config.sh app-and-api
+bash scripts/init-config.sh cloudflare-origin
 ```
 
 Point `primary.peers` at your real service and run:
@@ -138,6 +162,10 @@ That script checks that normal traffic passes and a few common hostile requests 
 - Maintenance mode with allowlisted IPs and allowed path prefixes for controlled rollouts.
 - Path-level protection rules for things like `/admin`, internal dashboards, or debug endpoints.
 - Configurable response header hardening so you can strip noisy upstream headers and add sane browser-facing defaults.
+- Blocking for high-risk file extensions, backup artifacts, and suspicious query keys like `token`, `password`, and `cmd`.
+- Safer request ID handling and trusted-proxy-only forwarding-proto preservation so clients cannot spoof internal origin context.
+- Reverse-proxy features that matter for real apps: optional public `Host` preservation, `/api` style prefix rewrites, `Forwarded` plus `X-Forwarded-*` headers, and upgrade-safe proxying for WebSockets.
+- Stronger hostile-traffic handling with local deceptive sinkholes, jittered tarpits, optional sinkhole upstream pools, and delayed blackholes that waste attacker time instead of instantly revealing the edge behavior.
 
 ## Repo Map
 
@@ -174,6 +202,7 @@ Useful config sections beyond filters:
 - `[maintenance]`
 - `[internal_endpoints]`
 - `[[protected_paths]]`
+- `config/profiles/cloudflare-origin.toml`
 
 ## Operational Notes
 

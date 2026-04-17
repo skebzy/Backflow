@@ -19,6 +19,7 @@ name = "origin"
 host_header = "origin.internal"
 sni = "origin.internal"
 use_tls = false
+preserve_original_host = true
 peers = [
   # Replace these demo localhost peers with your real origin addresses.
   "127.0.0.1:9000",
@@ -30,6 +31,7 @@ name = "api"
 host_header = "api.internal"
 sni = "api.internal"
 use_tls = false
+preserve_original_host = true
 peers = [
   "127.0.0.1:9200",
   "127.0.0.1:9201",
@@ -42,16 +44,17 @@ host_equals = "api.example.com"
 [[routes]]
 target_pool = "api"
 path_prefix = "/api/"
+rewrite_prefix = "/"
 
 [sinkhole]
 enabled = true
-name = "sinkhole"
-host_header = "sinkhole.internal"
-sni = "sinkhole.internal"
-use_tls = false
-peers = [
-  "127.0.0.1:9100",
-]
+mode = "local"
+local_status = 200
+local_body = "<html><body><h1>ok</h1></body></html>"
+local_content_type = "text/html; charset=utf-8"
+local_headers = { "Server" = "nginx", "X-Robots-Tag" = "noindex" }
+delay_ms = 250
+jitter_ms = 1000
 
 [health_checks]
 enabled = true
@@ -63,7 +66,9 @@ allow_ips = ["127.0.0.1"]
 block_ips = ["2001:db8:dead::/48"]
 allow_hosts = ["example.com", "www.example.com"]
 block_hosts = []
+allow_path_prefixes = ["/", "/api/", "/assets/"]
 require_host_header = true
+require_user_agent = false
 allow_methods = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 block_user_agents = ["curl/", "python-requests", "go-http-client", "masscan", "zgrab"]
 block_header_names = ["x-original-url", "x-rewrite-url"]
@@ -86,6 +91,14 @@ block_path_patterns = [
   "/.aws/",
   "/.ssh/",
 ]
+block_path_suffixes = [
+  "/.env",
+  "/.git/config",
+  "/id_rsa",
+  "/docker-compose.yml",
+  "/backup.sql",
+]
+block_file_extensions = [".env", ".sql", ".bak", ".pem", ".key", ".zip"]
 block_query_patterns = [
   "union select",
   "<script",
@@ -105,6 +118,7 @@ block_query_patterns = [
   "|curl ",
   "<?php",
 ]
+block_query_keys = ["token", "password", "cmd", "exec", "debug"]
 strip_connection_headers = true
 reject_underscored_headers = true
 reject_multiple_host_headers = true
@@ -139,6 +153,9 @@ query_spike_score = 2
 empty_header_score = 1
 blocked_ua_score = 3
 repeated_path_score = 2
+suspicious_header_score = 2
+suspicious_query_key_score = 2
+sensitive_extension_score = 3
 reject_status = 403
 reject_body = "blocked by backflow"
 
@@ -159,10 +176,15 @@ strike_threshold = 6
 ban_secs = 300
 ban_action = "blackhole"
 
+[blackhole]
+delay_ms = 1500
+jitter_ms = 3500
+log = true
+
 [trace]
 enabled = true
 request_id_header = "X-Request-ID"
-trust_incoming_request_id = true
+trust_incoming_request_id = false
 inject_correlation_header = true
 
 [response]
@@ -196,6 +218,9 @@ reject_body = "admin access denied"
 [backend]
 inject_headers = { "X-Backflow-Origin-Auth" = "replace-me" }
 set_forwarded_port = true
+forwarded_proto_header = "X-Forwarded-Proto"
+preserve_trusted_proto_header = true
+set_forwarded_header = true
 strip_inbound_internal_headers = [
   "X-Backflow-Client-IP",
   "X-Backflow-Decision",

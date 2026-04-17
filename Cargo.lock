@@ -162,6 +162,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "env_logger",
+ "http",
  "ipnet",
  "log",
  "pingora",
@@ -170,6 +171,7 @@ dependencies = [
  "pingora-load-balancing",
  "pingora-proxy",
  "serde",
+ "tokio",
  "toml",
 ]
 
